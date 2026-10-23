@@ -1,0 +1,54 @@
+services:
+  postgres:
+    # Образ postgres с уже собранным pgvector: CREATE EXTENSION vector
+    # активирует расширение, а не устанавливает его.
+    image: pgvector/pgvector:0.8.7-pg16
+    environment:
+      POSTGRES_USER: card
+      POSTGRES_PASSWORD: card
+      POSTGRES_DB: card
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U card -d card"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  temporal:
+    # Встроенный dev-сервер: один контейнер, состояние процессов — в SQLite
+    # на volume. UI: http://localhost:8233
+    image: temporalio/temporal:1.9.1
+    command: server start-dev --ip 0.0.0.0 --db-filename /home/temporal/temporal.db
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"       # gRPC
+      - "${TEMPORAL_UI_PORT:-8233}:8233"    # Web UI
+    volumes:
+      - temporal-data:/home/temporal
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: card
+      RABBITMQ_DEFAULT_PASS: card
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI: http://localhost:15672 (card/card)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+  temporal-data:
