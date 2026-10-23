@@ -1,7 +1,11 @@
-"""Repository-слой: таблица jobs в Postgres.
+"""Работа с таблицей jobs — единственное место, где живёт SQL по задачам.
 
-Единственный владелец SQL. Статусная машина:
-pending → extracting → generating → critiquing → (regenerating) → approved | rejected | failed
+Статусная машина предметной области:
+pending → extracting → generating → critiquing → regenerating →
+awaiting_approval → approved | rejected | failed
+
+Это состояние видит клиент. Внутренняя история процесса (попытки шагов,
+ретраи) живёт в Temporal и наружу не отдаётся.
 """
 import json
 import uuid
@@ -17,21 +21,28 @@ def _now() -> str:
 
 
 def create_job(conn: psycopg.Connection, payload: dict, idempotency_key: str | None) -> str:
-    """INSERT pending. При повторном idempotency_key возвращает существующий id."""
+    """INSERT pending. При повторном idempotency_key возвращает существующий id.
+
+    ON CONFLICT закрывает и гонку двух одновременных запросов с одним ключом:
+    вторая вставка ничего не делает, и мы читаем уже созданную задачу.
+    """
+    job_id = uuid.uuid4().hex[:12]
     with conn.cursor() as cur:
-        if idempotency_key:
-            cur.execute(
-                "SELECT id FROM jobs WHERE idempotency_key = %s", (idempotency_key,)
-            )
-            row = cur.fetchone()
-            if row:
-                return row[0]
-        job_id = uuid.uuid4().hex[:12]
-        cur.execute(
-            "INSERT INTO jobs (id, idempotency_key, payload) VALUES (%s, %s, %s)",
+        row = cur.execute(
+            """
+            INSERT INTO jobs (id, idempotency_key, payload)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING id
+            """,
             (job_id, idempotency_key, json.dumps(payload)),
-        )
-        return job_id
+        ).fetchone()
+        if row:
+            return row[0]
+        row = cur.execute(
+            "SELECT id FROM jobs WHERE idempotency_key = %s", (idempotency_key,)
+        ).fetchone()
+        return row[0]
 
 
 def set_status(
@@ -62,7 +73,13 @@ def get_job(conn: psycopg.Connection, job_id: str) -> dict | None:
         row = cur.fetchone()
     if not row:
         return None
-    job = {"id": row[0], "status": row[1], "attempts": row[2], "error": row[4]}
+    job = {
+        "id": row[0],
+        "status": row[1],
+        "attempts": row[2],
+        "result": None,
+        "error": row[4],
+    }
     if row[3]:
         # psycopg3 возвращает JSONB уже как dict, а не строку
         try:

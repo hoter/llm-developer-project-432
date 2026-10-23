@@ -19,8 +19,7 @@ xlsx, строит по ним поисковый индекс и генерир
 - Python 3.12, FastAPI, Pydantic v2
 - PostgreSQL 16 с расширением [pgvector](https://github.com/pgvector/pgvector)
 - psycopg 3 + `psycopg_pool` (пул соединений уровня приложения)
-- Temporal — устойчивое исполнение процессов (dev-сервер в Compose)
-- Celery + RabbitMQ — фоновые задачи
+- Temporal — фоновые процессы и ожидание подтверждения
 - OpenAI Agents SDK как LLM-клиент
 
 ## Установка
@@ -40,13 +39,12 @@ cp .env.example .env
 
 ## Инфраструктура
 
-`docker compose` поднимает три сервиса:
+`docker compose` поднимает два сервиса:
 
 - `postgres` — образ `pgvector/pgvector`, расширение `vector` уже собрано
   внутри, миграция его только активирует;
 - `temporal` — dev-сервер одним контейнером, состояние процессов лежит в
-  SQLite на volume `temporal-data`;
-- `rabbitmq` — брокер для Celery.
+  SQLite на volume `temporal-data`.
 
 ```bash
 make infra            # docker compose up -d
@@ -58,7 +56,6 @@ docker compose ps     # postgres и temporal должны быть running (heal
 | PostgreSQL | `localhost:5432` |
 | Temporal gRPC | `localhost:7233` |
 | Temporal Web UI | http://localhost:8233 |
-| RabbitMQ | `localhost:5672`, UI http://localhost:15672 (card/card) |
 
 Если 5432 занят другим Postgres: `PG_PORT=5433 make infra` и такой же порт в
 `DATABASE_URL`.
@@ -84,19 +81,58 @@ make migrate
 
 ```bash
 make api              # FastAPI на :8000 (терминал 1)
-make worker           # Celery-воркер (терминал 2)
-make temporal-worker  # Temporal-воркер (терминал 3)
+make temporal-worker  # Temporal-воркер (терминал 2)
 ```
 
-Примеры:
+## API
+
+| Метод | Путь | Что делает |
+|---|---|---|
+| `POST` | `/cards` | синхронно: текст → карточка (весь пайплайн в запросе) |
+| `POST` | `/jobs` | создаёт задачу, отвечает `202` и `id`; учитывает `Idempotency-Key` |
+| `GET` | `/jobs/{id}` | статус задачи из базы и готовый черновик |
+| `POST` | `/jobs/{id}/approve` | сигнал подтверждения |
+| `POST` | `/jobs/{id}/request-changes` | сигнал отказа |
+| `GET` | `/workflows/{id}` | состояние процесса в Temporal (`run_status` + query) |
+| `GET` | `/workflows/{id}/result` | результат завершённого процесса |
 
 ```bash
 curl -X POST localhost:8000/cards -H 'Content-Type: application/json' \
   -d '{"supplier_text": "..."}'
 
 curl -X POST localhost:8000/jobs -H 'Content-Type: application/json' \
-  -d '{"supplier_text": "..."}'
+  -H 'Idempotency-Key: demo-1' -d '{"supplier_text": "..."}'
+# {"id":"9fb442b9c16e","status":"pending"}
+
+curl localhost:8000/jobs/9fb442b9c16e
+curl -X POST localhost:8000/jobs/9fb442b9c16e/approve
 ```
+
+### Как идёт процесс
+
+```
+pending → extracting → generating → critiquing → (regenerating → …)
+        → awaiting_approval → approved | rejected
+                          ↘ failed
+```
+
+- `POST /jobs` создаёт строку в `jobs` и запускает `CardWorkflow` с
+  `id = id задачи`. Повтор с тем же `Idempotency-Key` возвращает ту же задачу
+  и не запускает второй прогон (`REJECT_DUPLICATE`), поэтому двойной клик не
+  даёт двойной счёт за токены.
+- Извлечение, генерация и проверка — отдельные activities; у каждой свой
+  `RetryPolicy`. Внутри шага клиент модели повторяет сам вызов, движок
+  повторяет шаг — это разные уровни.
+- Статус предметной области пишется в базу отдельной activity, а не изнутри
+  пайплайна: пока идёт вызов модели, соединение уже вернулось в пул.
+- Петля переделки — не больше трёх кругов, после чего черновик уходит человеку.
+- `awaiting_approval` — ожидание сигнала. Процесс при этом не занимает ни
+  потока, ни соединения и переживает рестарт воркера.
+- Если воркер убили посреди шага, новый воркер продолжит процесс: выполненные
+  шаги заново не прогоняются, а прерванный шаг повторяется по `heartbeat_timeout`
+  (воркер шлёт heartbeat каждые 10 секунд).
+
+История каждого процесса — http://localhost:8233.
 
 ## Проверки состояния
 
@@ -120,6 +156,10 @@ make test   # pytest
 make lint   # ruff check app tests
 ```
 
+Модель тестам не нужна: пайплайн проверяется с подменённым `run_agent`.
+Тесты репозитория задач работают на живой базе и пропускаются, если Postgres
+недоступен.
+
 ## Структура
 
 ```
@@ -132,8 +172,8 @@ app/
 ├── llm/           client.py
 ├── repositories/  jobs.py
 ├── schemas.py
-├── temporal/      workflows.py, activities.py
-└── workers/       celery_app.py, tasks.py
+├── temporal/      workflows.py, activities.py, client.py
+└── temporal_worker.py
 db/migrations/     SQL-миграции
 data/              документы поставщиков
 docs/decisions.md  архитектурные решения

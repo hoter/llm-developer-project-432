@@ -56,6 +56,19 @@ def test_pipeline_approves_on_first_critique(fake_llm):
     assert draft.title.startswith("МиксерПро")
 
 
+def test_pipeline_regenerates_once_then_approves(fake_llm):
+    """Первая проверка нашла проблему, вторая — одобрила."""
+    fake_llm["scenario"] += [
+        _facts(),
+        _draft(), CritiqueReport(verdict="regenerate", issues=["заголовок длинный"]),
+        _draft(title="МиксерПро 800"), CritiqueReport(verdict="approve"),
+    ]
+    draft, attempts, verdict = asyncio.run(pipeline.run_pipeline("текст"))
+    assert verdict == "approved"
+    assert attempts == 2
+    assert draft.title == "МиксерПро 800"
+
+
 def test_pipeline_regenerates_until_max_attempts(fake_llm):
     fake_llm["scenario"] += [
         _facts(),

@@ -9,7 +9,6 @@ class Settings(BaseSettings):
     llm_model: str = "gemma-4-e4b-it"
 
     database_url: str = "postgresql://card:card@localhost:5432/card"
-    rabbitmq_url: str = "amqp://card:card@localhost:5672//"
 
     # Пул соединений — ресурс уровня приложения (см. app/core/db.py)
     db_pool_min_size: int = 1

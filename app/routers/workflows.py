@@ -1,70 +1,46 @@
-"""Temporal-вариант через FastAPI: старт workflow, статус, сигналы."""
-import uuid
+"""Взгляд в движок: состояние процесса и его результат.
 
+Наружу клиент читает статус из базы (GET /jobs/{id}) — это предметное
+состояние. Здесь — внутренняя кухня Temporal: run_status (RUNNING, COMPLETED,
+FAILED) и значение query current_status. Полная история шагов видна в UI:
+http://localhost:8233
+"""
 from fastapi import APIRouter, HTTPException
-from temporalio.client import Client
+from temporalio.service import RPCError
 
-from app.core.config import settings
-from app.schemas import JobIn
+from app.temporal.client import get_client
 
 router = APIRouter(tags=["workflows"])
 
 
-async def _client() -> Client:
-    return await Client.connect(settings.temporal_host)
-
-
-@router.post("/workflows", status_code=202)
-async def start_workflow(body: JobIn):
-    client = await _client()
-    wf_id = f"card-{uuid.uuid4().hex[:12]}"
-    await client.start_workflow(
-        "CardWorkflow",
-        args=[body.supplier_text, 3],
-        id=wf_id,
-        task_queue=settings.temporal_task_queue,
-    )
-    return {"id": wf_id, "status": "started"}
-
-
 @router.get("/workflows/{wf_id}")
 async def workflow_status(wf_id: str):
-    client = await _client()
+    client = await get_client()
+    handle = client.get_workflow_handle(wf_id)
     try:
-        handle = client.get_workflow_handle(wf_id)
         desc = await handle.describe()
-        status_query = await handle.query("current_status")
-    except Exception:
+    except RPCError:
         raise HTTPException(404, "workflow not found")
+
+    try:
+        status_query = await handle.query("current_status")
+    except RPCError:
+        # Воркер не запущен: process state в движке есть, ответить на query некому.
+        status_query = None
+
     return {
         "id": wf_id,
-        "run_status": str(desc.status),
+        "run_status": getattr(desc.status, "name", None) or str(desc.status),
         "status": status_query,
     }
 
 
-@router.post("/workflows/{wf_id}/approve")
-async def approve(wf_id: str):
-    client = await _client()
-    handle = client.get_workflow_handle(wf_id)
-    await handle.signal("approve")
-    return {"id": wf_id, "signaled": "approve"}
-
-
-@router.post("/workflows/{wf_id}/request-changes")
-async def request_changes(wf_id: str):
-    client = await _client()
-    handle = client.get_workflow_handle(wf_id)
-    await handle.signal("request_changes")
-    return {"id": wf_id, "signaled": "request_changes"}
-
-
 @router.get("/workflows/{wf_id}/result")
 async def workflow_result(wf_id: str):
-    client = await _client()
+    client = await get_client()
     handle = client.get_workflow_handle(wf_id)
     try:
         result = await handle.result()
-    except Exception as exc:
-        raise HTTPException(409, f"not finished: {exc}")
+    except RPCError as exc:
+        raise HTTPException(409, f"not finished: {exc.message}")
     return {"id": wf_id, "result": result}
