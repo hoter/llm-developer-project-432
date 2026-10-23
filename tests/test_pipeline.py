@@ -1,32 +1,47 @@
-"""Тесты пайплайна с mock-агентами: без LM Studio и без сети."""
+"""Пайплайн с подменённым клиентом модели: без LM Studio и без сети."""
 import asyncio
 
 import pytest
 
+from app.core.config import settings
 from app.llm import client as llm_client
 from app.schemas import CardDraft, CritiqueReport, SupplierFacts
-from app.services import pipeline
+from app.services import pipeline, structured
 
 
 def _facts() -> SupplierFacts:
     return SupplierFacts(
         product_name="Блендер погружной «МиксерПро 800»",
         characteristics={"Мощность": "800 Вт", "Питание": "220 В"},
+        missing_fields=["Гарантия"],
     )
 
 
-def _draft(title="МиксерПро 800 — блендер 800 Вт") -> CardDraft:
+def _draft(
+    title: str = "МиксерПро 800 — блендер 800 Вт",
+    *,
+    confidence: float = 0.9,
+    missing_fields: list[str] | None = None,
+    description: str = "Погружной блендер с металлической ножкой и турбо-режимом.",
+) -> CardDraft:
     return CardDraft(
         title=title,
-        description="Погружной блендер с металлической ножкой и турбо-режимом.",
+        description=description,
         characteristics={"Мощность": "800 Вт"},
         benefits=["Металлическая ножка", "6 скоростей"],
+        missing_fields=missing_fields or [],
+        confidence=confidence,
+        seo={
+            "title": "Блендер МиксерПро 800",
+            "description": "Погружной блендер 800 Вт",
+            "keywords": ["блендер", "погружной"],
+        },
     )
 
 
 @pytest.fixture
 def fake_llm(monkeypatch):
-    """Подменяем run_agent: сценарий задаётся тестом."""
+    """Подменяем клиент модели: сценарий задаётся тестом, наружу — сырые строки."""
     calls = {"n": 0}
     scenario: list = []
 
@@ -37,7 +52,7 @@ def fake_llm(monkeypatch):
             raise result
         return result
 
-    monkeypatch.setattr(pipeline, "run_agent", fake_run)
+    monkeypatch.setattr(structured, "run_agent", fake_run)
     return {"scenario": scenario, "calls": calls}
 
 
@@ -49,7 +64,11 @@ def test_extract_parses_json_with_markdown_fencing(fake_llm):
 
 
 def test_pipeline_approves_on_first_critique(fake_llm):
-    fake_llm["scenario"] += [_facts(), _draft(), CritiqueReport(verdict="approve")]
+    fake_llm["scenario"] += [
+        _facts().model_dump_json(),
+        _draft().model_dump_json(),
+        CritiqueReport(verdict="approve").model_dump_json(),
+    ]
     draft, attempts, verdict = asyncio.run(pipeline.run_pipeline("текст"))
     assert verdict == "approved"
     assert attempts == 1
@@ -59,9 +78,11 @@ def test_pipeline_approves_on_first_critique(fake_llm):
 def test_pipeline_regenerates_once_then_approves(fake_llm):
     """Первая проверка нашла проблему, вторая — одобрила."""
     fake_llm["scenario"] += [
-        _facts(),
-        _draft(), CritiqueReport(verdict="regenerate", issues=["заголовок длинный"]),
-        _draft(title="МиксерПро 800"), CritiqueReport(verdict="approve"),
+        _facts().model_dump_json(),
+        _draft().model_dump_json(),
+        CritiqueReport(verdict="regenerate", issues=["заголовок длинный"]).model_dump_json(),
+        _draft(title="МиксерПро 800").model_dump_json(),
+        CritiqueReport(verdict="approve").model_dump_json(),
     ]
     draft, attempts, verdict = asyncio.run(pipeline.run_pipeline("текст"))
     assert verdict == "approved"
@@ -71,15 +92,32 @@ def test_pipeline_regenerates_once_then_approves(fake_llm):
 
 def test_pipeline_regenerates_until_max_attempts(fake_llm):
     fake_llm["scenario"] += [
-        _facts(),
-        _draft(), CritiqueReport(verdict="regenerate", issues=["заголовок длинный"]),
-        _draft(), CritiqueReport(verdict="regenerate", issues=["много воды"]),
-        _draft(), CritiqueReport(verdict="regenerate", issues=["всё ещё вода"]),
+        _facts().model_dump_json(),
+        _draft().model_dump_json(),
+        CritiqueReport(verdict="regenerate", issues=["заголовок длинный"]).model_dump_json(),
+        _draft().model_dump_json(),
+        CritiqueReport(verdict="regenerate", issues=["много воды"]).model_dump_json(),
+        _draft().model_dump_json(),
+        CritiqueReport(verdict="regenerate", issues=["всё ещё вода"]).model_dump_json(),
     ]
     draft, attempts, verdict = asyncio.run(pipeline.run_pipeline("текст", max_attempts=3))
     assert verdict == "rejected"
     assert attempts == 3
     assert draft is not None
+
+
+def test_pipeline_low_confidence_needs_review(fake_llm):
+    """Скудный текст: пробелы перечислены, уверенность низкая → не «готово»."""
+    fake_llm["scenario"] += [
+        _facts().model_dump_json(),
+        _draft(confidence=0.2, missing_fields=["Гарантия", "Цвет"]).model_dump_json(),
+        CritiqueReport(verdict="approve").model_dump_json(),
+    ]
+    draft, attempts, verdict = asyncio.run(pipeline.run_pipeline("скудный текст"))
+    assert verdict == "needs_review"
+    assert draft.missing_fields == ["Гарантия", "Цвет"]
+    assert draft.confidence < settings.confidence_threshold
+    assert attempts == 1
 
 
 def test_run_agent_retries_on_429(monkeypatch):

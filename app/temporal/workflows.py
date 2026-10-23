@@ -61,7 +61,11 @@ class CardWorkflow:
 
     @workflow.run
     async def run(
-        self, job_id: str, supplier_text: str, max_attempts: int = MAX_ATTEMPTS
+        self,
+        job_id: str,
+        supplier_text: str,
+        max_attempts: int = MAX_ATTEMPTS,
+        confidence_threshold: float = 0.6,
     ) -> str:
         try:
             await self._set_status(job_id, "extracting")
@@ -107,8 +111,23 @@ class CardWorkflow:
                     await self._set_status(job_id, "regenerating")
 
             # Человек решает всегда: петля могла исчерпаться, но черновик есть,
-            # и последнее слово — за контент-менеджером.
-            await self._set_status(job_id, "awaiting_approval", result_json=draft_json)
+            # и последнее слово — за контент-менеджером. Порог уверенности
+            # только уточняет состояние: «уверенная» карточка ждёт подтверждения,
+            # «неуверенная» помечается как требующая разбора.
+            confidence = float(json.loads(draft_json).get("confidence", 0.0))
+            needs_review = confidence < confidence_threshold
+            await self._set_status(
+                job_id,
+                "needs_review" if needs_review else "awaiting_approval",
+                result_json=draft_json,
+            )
+            if needs_review:
+                workflow.logger.info(
+                    "low confidence %.2f < %.2f for job %s",
+                    confidence,
+                    confidence_threshold,
+                    job_id,
+                )
             await workflow.wait_condition(lambda: self._decision is not None)
 
             if self._decision == "approve":

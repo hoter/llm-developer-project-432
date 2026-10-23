@@ -21,5 +21,10 @@ class Settings(BaseSettings):
     llm_timeout_s: float = 120.0
     llm_max_retries: int = 3
 
+    # Сколько раз просить модель переделать невалидный ответ (разбор + лечение)
+    llm_structured_attempts: int = 3
+    # Ниже порога карточка не считается готовой: задача уходит человеку
+    confidence_threshold: float = 0.6
+
 
 settings = Settings()

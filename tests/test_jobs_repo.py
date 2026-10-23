@@ -71,6 +71,13 @@ def test_status_and_result_roundtrip(conn, created):
         description="Погружной блендер с металлической ножкой.",
         characteristics={"Мощность": "800 Вт"},
         benefits=["Металлическая ножка"],
+        missing_fields=["Гарантия"],
+        confidence=0.75,
+        seo={
+            "title": "Блендер 800 Вт",
+            "description": "Погружной блендер 800 Вт",
+            "keywords": ["блендер"],
+        },
     )
     jobs_repo.set_status(conn, job_id, "approved", result=draft)
 

@@ -2,7 +2,7 @@
 
 Статусная машина предметной области:
 pending → extracting → generating → critiquing → regenerating →
-awaiting_approval → approved | rejected | failed
+awaiting_approval | needs_review → approved | rejected | failed
 
 Это состояние видит клиент. Внутренняя история процесса (попытки шагов,
 ретраи) живёт в Temporal и наружу не отдаётся.

@@ -30,7 +30,7 @@ async def _start_workflow(job_id: str, supplier_text: str) -> None:
     try:
         await client.start_workflow(
             "CardWorkflow",
-            args=[job_id, supplier_text, MAX_ATTEMPTS],
+            args=[job_id, supplier_text, MAX_ATTEMPTS, settings.confidence_threshold],
             id=job_id,
             task_queue=settings.temporal_task_queue,
             # Тот же ключ идемпотентности не должен запускать второй прогон

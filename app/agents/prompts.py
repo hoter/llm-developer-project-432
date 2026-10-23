@@ -1,10 +1,17 @@
 """Промпт как код: три агента кард-пайплайна — extractor, generator, critic.
 
-Прямые наследники агентов из Занятия 1 (demo.py) — та же модель,
-тот же паттерн дублирования схемы текстом в промпте (LM Studio не
-поддерживает strict JSON mode).
+Схема ответа не пишется руками: она генерируется из Pydantic-модели и
+дублируется в инструкции текстом. LM Studio (chat completions) строгий
+json_schema-режим не поддерживает, поэтому принудить модель к форме на её
+стороне нельзя — форму проверяет приложение (app/services/structured.py).
+
+Поэтому у агентов нет output_type: SDK не парсит и не валидирует ответ за
+нас, наружу идёт сырая строка, и весь путь «разбор → валидация → лечение»
+принадлежит приложению.
 """
-from agents import Agent, AgentOutputSchema, ModelSettings
+import json
+
+from agents import Agent, ModelSettings
 
 from app.core.config import settings
 from app.schemas import CardDraft, CritiqueReport, SupplierFacts
@@ -16,38 +23,46 @@ _MODEL = settings.llm_model
 # обрывает stream по таймауту. 4096 хватает на размышления + JSON-ответ.
 _MODEL_SETTINGS = ModelSettings(max_tokens=4096, temperature=0.4)
 
+
+def _schema_text(model) -> str:
+    """JSON-схема модели — то, что мы передаём модели текстом."""
+    return json.dumps(model.model_json_schema(), ensure_ascii=False, indent=2)
+
+
 extractor_agent = Agent(
     name="Extractor",
     instructions=(
         "Ты — извлекатель фактов. Из текста поставщика выдели структурированные факты.\n"
-        "Верни СТРОГО JSON с этими полями и никаких других:\n"
-        "- product_name (string): название товара\n"
-        "- characteristics (object): пары ключ-значение, ТОЛЬКО из текста\n"
-        "- missing_fields (array of string): что важно для карточки, но в тексте нет "
-        "(например: гарантия, цвет, страна-производитель)\n"
-        "Не выдумывай. Нет данных — поле в missing_fields. "
-        "Никакого markdown, только валидный JSON."
+        "Правила:\n"
+        "1. Бери ТОЛЬКО то, что явно написано в тексте. Ничего не выдумывай.\n"
+        "2. Чего в тексте нет — положи имя поля в missing_fields "
+        "(например: гарантия, цвет, страна-производитель).\n"
+        "3. Никакого markdown и пояснений: только валидный JSON.\n\n"
+        "Схема ответа:\n" + _schema_text(SupplierFacts)
     ),
     model=_MODEL,
     model_settings=_MODEL_SETTINGS,
-    output_type=AgentOutputSchema(SupplierFacts, strict_json_schema=False),
 )
 
 generator_agent = Agent(
     name="Generator",
     instructions=(
         "Ты — копирайтер маркетплейса. Из фактов о товаре сделай черновик карточки.\n"
-        "Верни СТРОГО JSON с этими полями и никаких других:\n"
-        "- title (string): заголовок до 60 символов\n"
-        "- description (string): описание на 3-4 предложения, продающее, без воды\n"
-        "- characteristics (object): характеристики ключ-значение\n"
-        "- benefits (array of string): 3-5 преимуществ\n"
-        "Используй только предоставленные факты. Если есть замечания критика "
-        "(feedback) — учти их. Никакого markdown, только валидный JSON."
+        "Правила:\n"
+        "1. Используй только предоставленные факты. Если данных нет — не выдумывай: "
+        "имя поля должно быть в missing_fields, значение — не появляться в characteristics.\n"
+        "2. title короче 60 символов; description — 3-4 предложения без воды.\n"
+        "3. Поле не может быть одновременно в characteristics и в missing_fields.\n"
+        "4. characteristics — только пары ключ-значение, без пустых значений.\n"
+        "5. confidence — честная уверенность от 0 до 1: мало данных — низкая.\n"
+        "6. seo — вложенный объект: title, description, keywords.\n"
+        "7. sources оставь пустым списком.\n"
+        "8. Если есть замечания критика (feedback) — учти их.\n"
+        "Никакого markdown и пояснений: только валидный JSON.\n\n"
+        "Схема ответа:\n" + _schema_text(CardDraft)
     ),
     model=_MODEL,
     model_settings=_MODEL_SETTINGS,
-    output_type=AgentOutputSchema(CardDraft, strict_json_schema=False),
 )
 
 critic_agent = Agent(
@@ -58,12 +73,13 @@ critic_agent = Agent(
         "2. Нет характеристик, которых нет в фактах (выдуманные)\n"
         "3. description и benefits не пустые\n"
         "4. Нет воды («высокое качество», «лучшая цена») без конкретики\n"
+        "5. Нет поля одновременно в characteristics и missing_fields\n"
         "Верни СТРОГО JSON:\n"
         '- verdict (string): "approve" если всё ок, иначе "regenerate"\n'
         "- issues (array of string): список проблем; при approve — пустой\n"
-        "Никакого markdown, только валидный JSON."
+        "Никакого markdown, только валидный JSON.\n\n"
+        "Схема ответа:\n" + _schema_text(CritiqueReport)
     ),
     model=_MODEL,
     model_settings=_MODEL_SETTINGS,
-    output_type=AgentOutputSchema(CritiqueReport, strict_json_schema=False),
 )

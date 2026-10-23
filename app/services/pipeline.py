@@ -6,24 +6,22 @@
 Это и есть выигрыш слоистой архитектуры.
 
 Пайплайн не знает про базу и статусы: состояние задачи пишет отдельный шаг
-процесса (app/temporal/activities.py).
+процесса (app/temporal/activities.py). Зато он знает про контракт: ответ
+модели проходит через app/services/structured.py — разбор, валидацию и
+лечение, а не «повезёт/не повезёт».
 """
-
-
 from app.agents.prompts import critic_agent, extractor_agent, generator_agent
+from app.core.config import settings
 from app.core.logging import get_logger
-from app.llm.client import run_agent
 from app.schemas import CardDraft, CritiqueReport, SupplierFacts
+from app.services.structured import call_structured
 
 log = get_logger(__name__)
 
 
 async def extract(supplier_text: str) -> SupplierFacts:
     log.info("step_extract_start")
-    out = await run_agent(extractor_agent, supplier_text)
-    if isinstance(out, SupplierFacts):
-        return out
-    return SupplierFacts.model_validate_json(_ensure_json(out))
+    return await call_structured(extractor_agent, supplier_text, SupplierFacts)
 
 
 async def generate(facts: SupplierFacts, feedback: list[str] | None = None) -> CardDraft:
@@ -31,10 +29,7 @@ async def generate(facts: SupplierFacts, feedback: list[str] | None = None) -> C
     if feedback:
         prompt += "\n\nЗамечания критика, учти:\n" + "\n".join(f"- {i}" for i in feedback)
     log.info("step_generate_start", feedback=bool(feedback))
-    out = await run_agent(generator_agent, prompt)
-    if isinstance(out, CardDraft):
-        return out
-    return CardDraft.model_validate_json(_ensure_json(out))
+    return await call_structured(generator_agent, prompt, CardDraft)
 
 
 async def critique(facts: SupplierFacts, draft: CardDraft) -> CritiqueReport:
@@ -45,26 +40,16 @@ async def critique(facts: SupplierFacts, draft: CardDraft) -> CritiqueReport:
         + draft.model_dump_json(indent=2)
     )
     log.info("step_critique_start")
-    out = await run_agent(critic_agent, prompt)
-    if isinstance(out, CritiqueReport):
-        return out
-    return CritiqueReport.model_validate_json(_ensure_json(out))
-
-
-def _ensure_json(text) -> str:
-    """Локальные модели иногда оборачивают JSON в ```json ... ``` — срезаем."""
-    s = str(text).strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[1] if "\n" in s else s
-        s = s.rsplit("```", 1)[0]
-    return s.strip()
+    return await call_structured(critic_agent, prompt, CritiqueReport)
 
 
 async def run_pipeline(supplier_text: str, max_attempts: int = 3):
     """Полный цикл: extract → (generate → critique → feedback)* → итог.
 
     Возвращает (итоговый черновик, число генераций, вердикт).
-    Используется FastAPI-эндпоинтом /cards и Temporal-workflow'ом.
+
+    Вердикт ``needs_review`` — критик доволен, но уверенность модели ниже
+    порога: такая карточка не «готова», её обязан посмотреть человек.
     """
     facts = await extract(supplier_text)
     feedback: list[str] = []
@@ -76,7 +61,16 @@ async def run_pipeline(supplier_text: str, max_attempts: int = 3):
         draft = await generate(facts, feedback or None)
         report = await critique(facts, draft)
         if report.verdict == "approve":
-            verdict = "approved"
+            if draft.confidence < settings.confidence_threshold:
+                verdict = "needs_review"
+                log.info(
+                    "pipeline_low_confidence",
+                    confidence=draft.confidence,
+                    threshold=settings.confidence_threshold,
+                    missing=len(draft.missing_fields),
+                )
+            else:
+                verdict = "approved"
             break
         feedback = report.issues
         log.info("pipeline_regenerate", attempt=attempts, issues=report.issues)
