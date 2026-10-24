@@ -94,3 +94,20 @@ def set_status(
     args.append(document_id)
     with conn.cursor() as cur:
         cur.execute(f"UPDATE documents SET {', '.join(sets)} WHERE id = %s", args)
+
+
+def get_documents(conn: psycopg.Connection, document_ids: list[str]) -> list[dict]:
+    """Документы по списку id — для проверки выбора и подписи контекста."""
+    if not document_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, filename, status, chunks_count
+            FROM documents WHERE id = ANY(%s) ORDER BY filename
+            """,
+            (document_ids,),
+        )
+        rows = cur.fetchall()
+        columns = [column.name for column in cur.description]
+    return [dict(zip(columns, row)) for row in rows]

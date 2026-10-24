@@ -223,6 +223,10 @@ def _filter_clause(filters: dict) -> tuple[str, list]:
         if value:
             clauses.append(f"c.{column} = %s")
             args.append(value)
+    document_ids = filters.get("document_ids")
+    if document_ids:
+        clauses.append("c.document_id = ANY(%s)")
+        args.append(document_ids)
     if not clauses:
         return "", args
     return "AND " + " AND ".join(clauses), args
@@ -238,3 +242,32 @@ def _fetch(conn: psycopg.Connection, query: str, args: list) -> list[dict]:
         rows = cur.fetchall()
         columns = [column.name for column in cur.description]
     return [dict(zip(columns, row)) for row in rows]
+
+
+def existing_chunk_ids(conn: psycopg.Connection, chunk_ids: list[int]) -> set[int]:
+    if not chunk_ids:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM chunks WHERE id = ANY(%s)", (chunk_ids,))
+        return {row[0] for row in cur.fetchall()}
+
+
+def get_chunks_by_ids(
+    conn: psycopg.Connection, chunk_ids: list[int]
+) -> dict[str, dict]:
+    """Фрагменты по id: нужны, чтобы дописать источники к готовой карточке."""
+    if not chunk_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT {_CHUNK_COLUMNS}
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.id = ANY(%s)
+            """,
+            (chunk_ids,),
+        )
+        rows = cur.fetchall()
+        columns = [column.name for column in cur.description]
+    return {str(row[0]): dict(zip(columns, row)) for row in rows}

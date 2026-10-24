@@ -1,8 +1,10 @@
 """Работа с таблицей jobs — единственное место, где живёт SQL по задачам.
 
 Статусная машина предметной области:
-pending → extracting → generating → critiquing → regenerating →
+pending → retrieving → generating → verifying → critiquing → regenerating →
 awaiting_approval | needs_review → approved | rejected | failed
+
+Ветка без документов (текст): extracting → generating → critiquing → …
 
 Это состояние видит клиент. Внутренняя история процесса (попытки шагов,
 ретраи) живёт в Temporal и наружу не отдаётся.

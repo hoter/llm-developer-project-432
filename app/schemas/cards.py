@@ -13,12 +13,20 @@ SEO_TITLE_MAX_LENGTH = 60
 SEO_DESCRIPTION_MAX_LENGTH = 160
 
 
-class SourceRef(BaseModel):
-    """Ссылка на фрагмент документа поставщика, откуда взято значение."""
+class Citation(BaseModel):
+    """Ссылка на фрагмент контекста, откуда взято утверждение.
 
-    document: str = Field(min_length=1, description="Имя файла документа поставщика")
-    fragment: str = Field(
-        min_length=1, description="Дословный фрагмент текста, откуда взято значение"
+    ``chunk_id`` — идентификатор фрагмента из поданного контекста. Модель
+    видит короткие метки [S1], [S2]; приложение подменяет их на настоящие
+    id фрагментов и проверяет, что фрагмент существует и был в контексте.
+    """
+
+    field: str = Field(
+        min_length=1,
+        description="Поле карточки: title, description или characteristics.<имя>",
+    )
+    chunk_id: str = Field(
+        min_length=1, description="Идентификатор фрагмента из контекста"
     )
 
 
@@ -67,8 +75,9 @@ class CardDraft(BaseModel):
         description="Уверенность в карточке от 0 до 1; ниже порога — нужен человек",
     )
     seo: SeoBlock
-    sources: list[SourceRef] = Field(
-        default_factory=list, description="Источники значений (появятся с поиском по документам)"
+    sources: list[Citation] = Field(
+        default_factory=list,
+        description="Ссылки: какое поле карточки из какого фрагмента взято",
     )
 
     @field_validator("title")

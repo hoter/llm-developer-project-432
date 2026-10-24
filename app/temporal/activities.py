@@ -16,10 +16,11 @@ from temporalio import activity
 
 from app.core import db
 from app.core.logging import get_logger
+from app.rag.context import DocumentContext
 from app.repositories import jobs as jobs_repo
 from app.schemas import CardDraft, SupplierFacts
 from app.services import documents as documents_service
-from app.services import pipeline
+from app.services import pipeline, rag_pipeline
 
 log = get_logger(__name__)
 
@@ -99,3 +100,36 @@ def parse_document_activity(document_id: str) -> str:
     причиной — нормальный исход: скан без текстового слоя не индексируется.
     """
     return documents_service.ingest_document(document_id)
+
+
+@activity.defn
+def retrieve_context_activity(document_ids: list[str], hint: str | None = None) -> str:
+    """Поиск и сборка контекста: embeddings + SQL, синхронно в пуле потоков."""
+    return rag_pipeline.retrieve_context(document_ids, hint).to_json()
+
+
+@activity.defn
+async def generate_card_activity(
+    context_json: str, hint: str | None = None, feedback_json: str | None = None
+) -> str:
+    context = DocumentContext.from_json(context_json)
+    feedback = json.loads(feedback_json) if feedback_json else None
+    draft = await _with_heartbeat(rag_pipeline.generate_card(context, hint, feedback))
+    return draft.model_dump_json()
+
+
+@activity.defn
+def verify_citations_activity(draft_json: str, context_json: str) -> str:
+    """Проверка ссылок: фрагмент существует и был в контексте (SQL + память)."""
+    draft = CardDraft.model_validate_json(draft_json)
+    context = DocumentContext.from_json(context_json)
+    errors = rag_pipeline.verify_citations(draft, context)
+    return json.dumps(errors, ensure_ascii=False)
+
+
+@activity.defn
+async def critique_card_activity(draft_json: str, context_json: str) -> str:
+    draft = CardDraft.model_validate_json(draft_json)
+    context = DocumentContext.from_json(context_json)
+    report = await _with_heartbeat(rag_pipeline.critique_card(draft, context))
+    return report.model_dump_json()

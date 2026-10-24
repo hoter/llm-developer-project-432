@@ -25,6 +25,7 @@ class SearchFilters:
     """Фильтры по метаданным фрагмента."""
 
     document_id: str | None = None
+    document_ids: list[str] | None = None
     section: str | None = None
     article: str | None = None
     brand: str | None = None

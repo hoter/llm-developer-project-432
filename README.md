@@ -98,6 +98,10 @@ make temporal-worker  # Temporal-воркер (терминал 2)
 | `POST` | `/documents` | загрузка файла поставщика, `202` и `id`; `pdf`, `docx`, `xlsx` |
 | `GET` | `/documents/{id}` | состояние документа и число фрагментов |
 | `GET` | `/search` | поиск `q` в режиме `vector` \| `text` \| `hybrid` + фильтры |
+| `POST` | `/generate` | сквозной сценарий: документы + подсказка → `202` и `id` |
+| `GET` | `/generate/{id}` | карточка со ссылками и раскрытыми источниками |
+| `POST` | `/generate/{id}/approve` | подтверждение человеком |
+| `POST` | `/generate/{id}/request-changes` | отказ человеком |
 | `GET` | `/workflows/{id}` | состояние процесса в Temporal (`run_status` + query) |
 | `GET` | `/workflows/{id}/result` | результат завершённого процесса |
 
@@ -124,11 +128,24 @@ curl -G localhost:8000/search --data-urlencode "q=KTL-1700" \
 
 ### Как идёт процесс
 
+С текстом (`POST /jobs`):
+
 ```
 pending → extracting → generating → critiquing → (regenerating → …)
         → awaiting_approval | needs_review → approved | rejected
                                            ↘ failed
 ```
+
+С документами (`POST /generate`):
+
+```
+pending → retrieving → generating → verifying → critiquing → (regenerating → …)
+        → awaiting_approval | needs_review → approved | rejected
+                                           ↘ failed
+```
+
+`retrieving` — поиск и сборка контекста, `verifying` — проверка ссылок,
+`critiquing` — сверка утверждений с источниками.
 
 - `POST /jobs` создаёт строку в `jobs` и запускает `CardWorkflow` с
   `id = id задачи`. Повтор с тем же `Idempotency-Key` возвращает ту же задачу
@@ -252,6 +269,40 @@ make reindex    # python -m app.rag.reindex
 
 Фильтры — параметры поиска: `document_id`, `section`, `article`, `brand`.
 
+## Сквозной сценарий: документы → карточка со ссылками
+
+```bash
+curl -X POST localhost:8000/generate -H 'Content-Type: application/json' -d '{
+  "document_ids": ["9e68f8d256b5", "cd576d37333d"],
+  "hint": "блендер МиксерПро 800, мощность и скорости"
+}'
+# {"id":"d24c42ffc575","status":"pending"}
+
+curl localhost:8000/generate/d24c42ffc575
+curl -X POST localhost:8000/generate/d24c42ffc575/approve
+```
+
+**Контекст.** Фрагменты подаются модели с метками `[S1]`, `[S2]`, …: у каждого
+видны документ, страница, секция, артикул и бренд. Одинаковые тексты из разных
+документов схлопываются, общий размер ограничен `RAG_CONTEXT_MAX_CHARS`,
+число фрагментов — `RAG_SEARCH_LIMIT`. Поиск — гибридный, с фильтром по
+выбранным документам; запрос — подсказка, а без неё — названия документов.
+
+**Три рубежа против выдумывания:**
+
+1. поиск: модель видит только найденные фрагменты;
+2. проверка ссылок: каждая ссылка обязана указывать на фрагмент, который
+   **существует в базе** и **был в поданном контексте**. Второе важнее:
+   сослаться на реальный, но не показанный фрагмент — то же выдумывание,
+   только правдоподобное. Нарушение → переделка с текстом ошибки, после
+   исчерпания попыток → человек;
+3. критик: сверяет каждое утверждение с заявленным источником.
+
+У каждой характеристики должна быть ссылка `characteristics.<имя>`. Модель
+возвращает метки `S1`, приложение подменяет их на настоящие id фрагментов и
+проверяет по базе. В `GET /generate/{id}` у каждой ссылки раскрыты документ,
+страница, секция и текст фрагмента.
+
 ## Проверки состояния
 
 | Эндпоинт | Что проверяет |
@@ -291,7 +342,11 @@ make lint   # ruff check app tests
   дублей при повторной загрузке и повторном разборе;
 - поиск на заранее заданных векторах (модель не грузится): порог отсекает,
   гибрид возвращает объединение, фрагмент из обоих списков идёт первым,
-  фильтры сужают выборку, досчёт векторов идемпотентен.
+  фильтры сужают выборку, досчёт векторов идемпотентен;
+- контекст: метки S1…, дедупликация, предел размера;
+- сквозной сценарий с подменённым клиентом модели и фрагментами в тестовой
+  базе: поиск, генерация, проверка ссылок, критик, согласовано; выдуманная
+  ссылка уходит на переделку, несуществующая — к человеку после попыток.
 
 Тесты репозиториев работают на живой базе и пропускаются, если Postgres
 недоступен.
@@ -303,10 +358,10 @@ app/
 ├── main.py
 ├── core/          config.py, db.py, logging.py, migrate.py
 ├── routers/       health.py, cards.py, jobs.py, documents.py, workflows.py
-├── services/      pipeline.py, structured.py, json_utils.py, documents.py
+├── services/      pipeline.py, rag_pipeline.py, structured.py, json_utils.py, documents.py
 ├── agents/        prompts.py
 ├── llm/           client.py
-├── rag/           embedder.py, retrieval.py, reindex.py
+├── rag/           embedder.py, retrieval.py, reindex.py, context.py
 ├── parsers/       pdf.py, docx.py, xlsx.py, normalizer.py, chunker.py
 ├── repositories/  jobs.py, documents.py, chunks.py
 ├── schemas/       cards.py, jobs.py

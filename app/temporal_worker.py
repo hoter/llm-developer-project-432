@@ -15,12 +15,16 @@ from app.core.config import settings
 from app.core.logging import get_logger, setup_logging
 from app.temporal.activities import (
     critique_activity,
+    critique_card_activity,
     extract_activity,
     generate_activity,
+    generate_card_activity,
     parse_document_activity,
+    retrieve_context_activity,
     set_status_activity,
+    verify_citations_activity,
 )
-from app.temporal.workflows import CardWorkflow, DocumentWorkflow
+from app.temporal.workflows import CardWorkflow, DocumentWorkflow, RagCardWorkflow
 
 log = get_logger(__name__)
 
@@ -37,13 +41,17 @@ async def main() -> None:
     worker = Worker(
         client,
         task_queue=settings.temporal_task_queue,
-        workflows=[CardWorkflow, DocumentWorkflow],
+        workflows=[CardWorkflow, DocumentWorkflow, RagCardWorkflow],
         activities=[
             extract_activity,
             generate_activity,
             critique_activity,
             set_status_activity,
             parse_document_activity,
+            retrieve_context_activity,
+            generate_card_activity,
+            verify_citations_activity,
+            critique_card_activity,
         ],
         activity_executor=executor,
     )

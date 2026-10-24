@@ -22,3 +22,10 @@ class DocumentOut(BaseModel):
     status: str
     chunks_count: int
     error: str | None = None
+
+
+class GenerateIn(BaseModel):
+    """Запрос сквозной генерации: выбранные документы + подсказка."""
+
+    document_ids: list[str] = Field(min_length=1, description="Документы поставщика")
+    hint: str | None = Field(default=None, description="Что это за товар")

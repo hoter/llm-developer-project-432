@@ -24,10 +24,14 @@ with workflow.unsafe.imports_passed_through():
     # только ссылки на функции — исполнение всё равно вне песочницы.
     from app.temporal.activities import (
         critique_activity,
+        critique_card_activity,
         extract_activity,
         generate_activity,
+        generate_card_activity,
         parse_document_activity,
+        retrieve_context_activity,
         set_status_activity,
+        verify_citations_activity,
     )
 
 ACTIVITY_TIMEOUT = timedelta(seconds=300)
@@ -203,3 +207,133 @@ class DocumentWorkflow:
             start_to_close_timeout=DOCUMENT_TIMEOUT,
             retry_policy=DOCUMENT_RETRY,
         )
+
+
+@workflow.defn
+class RagCardWorkflow:
+    """Сквозной сценарий: поиск, генерация, проверка ссылок, критик, человек."""
+
+    def __init__(self) -> None:
+        self._status = "starting"
+        self._decision: str | None = None
+
+    @workflow.run
+    async def run(
+        self,
+        job_id: str,
+        document_ids: list[str],
+        hint: str | None = None,
+        max_attempts: int = MAX_ATTEMPTS,
+        confidence_threshold: float = 0.6,
+    ) -> str:
+        try:
+            await self._set_status(job_id, "retrieving")
+            context_json = await workflow.execute_activity(
+                retrieve_context_activity,
+                args=[document_ids, hint],
+                start_to_close_timeout=ACTIVITY_TIMEOUT,
+                heartbeat_timeout=HEARTBEAT_TIMEOUT,
+                retry_policy=STEP_RETRY,
+            )
+
+            feedback: list[str] = []
+            draft_json = "{}"
+            attempts = 0
+            while attempts < max_attempts:
+                attempts += 1
+
+                await self._set_status(job_id, "generating", bump_attempts=True)
+                draft_json = await workflow.execute_activity(
+                    generate_card_activity,
+                    args=[
+                        context_json,
+                        hint,
+                        json.dumps(feedback, ensure_ascii=False) if feedback else None,
+                    ],
+                    start_to_close_timeout=ACTIVITY_TIMEOUT,
+                    heartbeat_timeout=HEARTBEAT_TIMEOUT,
+                    retry_policy=STEP_RETRY,
+                )
+
+                await self._set_status(job_id, "verifying")
+                errors = json.loads(
+                    await workflow.execute_activity(
+                        verify_citations_activity,
+                        args=[draft_json, context_json],
+                        start_to_close_timeout=STATUS_TIMEOUT,
+                        retry_policy=STATUS_RETRY,
+                    )
+                )
+                if errors:
+                    feedback = errors
+                    workflow.logger.info("citations rejected on attempt %s", attempts)
+                    if attempts < max_attempts:
+                        await self._set_status(job_id, "regenerating")
+                    continue
+
+                await self._set_status(job_id, "critiquing")
+                report = json.loads(
+                    await workflow.execute_activity(
+                        critique_card_activity,
+                        args=[draft_json, context_json],
+                        start_to_close_timeout=ACTIVITY_TIMEOUT,
+                        heartbeat_timeout=HEARTBEAT_TIMEOUT,
+                        retry_policy=STEP_RETRY,
+                    )
+                )
+                if report.get("verdict") == "approve":
+                    break
+                feedback = report.get("issues") or []
+                if attempts < max_attempts:
+                    await self._set_status(job_id, "regenerating")
+
+            confidence = float(json.loads(draft_json).get("confidence", 0.0))
+            await self._set_status(
+                job_id,
+                "needs_review" if confidence < confidence_threshold else "awaiting_approval",
+                result_json=draft_json,
+            )
+            await workflow.wait_condition(lambda: self._decision is not None)
+
+            if self._decision == "approve":
+                await self._set_status(job_id, "approved", result_json=draft_json)
+            else:
+                await self._set_status(
+                    job_id, "rejected", result_json=draft_json, error="rejected by human"
+                )
+            return draft_json
+        except Exception as exc:
+            try:
+                await self._set_status(job_id, "failed", error=repr(exc))
+            except Exception:
+                workflow.logger.exception("failed to mark job %s as failed", job_id)
+            raise
+
+    async def _set_status(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        result_json: str | None = None,
+        error: str | None = None,
+        bump_attempts: bool = False,
+    ) -> None:
+        self._status = status
+        await workflow.execute_activity(
+            set_status_activity,
+            args=[job_id, status, result_json, error, bump_attempts],
+            start_to_close_timeout=STATUS_TIMEOUT,
+            retry_policy=STATUS_RETRY,
+        )
+
+    @workflow.signal
+    def approve(self) -> None:
+        self._decision = "approve"
+
+    @workflow.signal
+    def request_changes(self) -> None:
+        self._decision = "reject"
+
+    @workflow.query
+    def current_status(self) -> str:
+        return self._status

@@ -8,23 +8,24 @@ from app.schemas.cards import (
     SEO_TITLE_MAX_LENGTH,
     TITLE_MAX_LENGTH,
     CardDraft,
+    Citation,
     CritiqueReport,
     SeoBlock,
-    SourceRef,
     SupplierFacts,
 )
-from app.schemas.jobs import DocumentOut, JobIn, JobOut
+from app.schemas.jobs import DocumentOut, GenerateIn, JobIn, JobOut
 
 __all__ = [
     "SEO_DESCRIPTION_MAX_LENGTH",
     "SEO_TITLE_MAX_LENGTH",
     "TITLE_MAX_LENGTH",
     "CardDraft",
+    "Citation",
     "CritiqueReport",
     "DocumentOut",
+    "GenerateIn",
     "JobIn",
     "JobOut",
     "SeoBlock",
-    "SourceRef",
     "SupplierFacts",
 ]

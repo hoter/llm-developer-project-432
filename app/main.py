@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from app.core import db
 from app.core.config import settings
 from app.core.logging import get_logger, setup_logging
-from app.routers import cards, documents, health, jobs, workflows
+from app.routers import cards, documents, generate, health, jobs, workflows
 
 log = get_logger(__name__)
 
@@ -33,4 +33,5 @@ app.include_router(health.router)
 app.include_router(cards.router)
 app.include_router(jobs.router)
 app.include_router(documents.router)
+app.include_router(generate.router)
 app.include_router(workflows.router)
