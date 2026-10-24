@@ -35,10 +35,10 @@ xlsx, строит по ним поисковый индекс и генерир
 git clone https://github.com/hoter/llm-developer-project-432.git
 cd llm-developer-project-432
 
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.lock    # фиксированные версии, одна команда
+# uv — менеджер зависимостей и виртуального окружения (если ещё не установлен)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
+uv sync --frozen    # зависимости из uv.lock, одна команда
 cp .env.example .env
 ```
 
@@ -86,8 +86,8 @@ make migrate
 # второй запуск:  новых миграций нет
 ```
 
-Зависимости зафиксированы в `requirements.lock` (сгенерирован из
-`requirements-dev.txt`). Новая миграция — файл с префиксом порядка (`0007_…`),
+Зависимости зафиксированы в `uv.lock` (источник — `pyproject.toml`).
+Новая миграция — файл с префиксом порядка (`0007_…`),
 применяется тем же `make migrate`. Почему SQL-файлы, а не Alembic —
 в [docs/decisions.md](docs/decisions.md).
 
@@ -102,7 +102,7 @@ make temporal-worker  # Temporal-воркер (терминал 2)
 
 ```bash
 make infra            # postgres + temporal
-make migrate          # схема с нуля
+make setup            # uv sync --frozen + миграции
 make api              # терминал 1: FastAPI :8000
 make temporal-worker  # терминал 2: воркер процессов
 
@@ -125,7 +125,7 @@ curl -X POST localhost:8000/generate/<id>/approve
 ```bash
 docker compose down -v   # удалить тома, не только контейнеры
 rm -rf data/uploads && mkdir -p data/uploads
-make infra && make migrate
+make infra && make setup
 ```
 
 Отчёт о приёмке: [REPORT.md](REPORT.md). Ответы на вопросы защиты:
