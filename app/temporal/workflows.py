@@ -69,14 +69,15 @@ class CardWorkflow:
         self,
         job_id: str,
         supplier_text: str,
+        request_id: str | None = None,
         max_attempts: int = MAX_ATTEMPTS,
         confidence_threshold: float = 0.6,
     ) -> str:
         try:
-            await self._set_status(job_id, "extracting")
+            await self._set_status(job_id, "extracting", request_id=request_id)
             facts_json = await workflow.execute_activity(
                 extract_activity,
-                supplier_text,
+                args=[supplier_text, job_id, request_id],
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 heartbeat_timeout=HEARTBEAT_TIMEOUT,
                 retry_policy=STEP_RETRY,
@@ -87,22 +88,24 @@ class CardWorkflow:
             attempts = 0
             while attempts < max_attempts:
                 attempts += 1
-                await self._set_status(job_id, "generating", bump_attempts=True)
+                await self._set_status(job_id, "generating", bump_attempts=True, request_id=request_id)
                 draft_json = await workflow.execute_activity(
                     generate_activity,
                     args=[
                         facts_json,
                         json.dumps(feedback, ensure_ascii=False) if feedback else None,
+                        job_id,
+                        request_id,
                     ],
                     start_to_close_timeout=ACTIVITY_TIMEOUT,
                     heartbeat_timeout=HEARTBEAT_TIMEOUT,
                     retry_policy=STEP_RETRY,
                 )
 
-                await self._set_status(job_id, "critiquing")
+                await self._set_status(job_id, "critiquing", request_id=request_id)
                 report_json = await workflow.execute_activity(
                     critique_activity,
-                    args=[facts_json, draft_json],
+                    args=[facts_json, draft_json, job_id, request_id],
                     start_to_close_timeout=ACTIVITY_TIMEOUT,
                     heartbeat_timeout=HEARTBEAT_TIMEOUT,
                     retry_policy=STEP_RETRY,
@@ -113,7 +116,7 @@ class CardWorkflow:
 
                 feedback = report.get("issues") or []
                 if attempts < max_attempts:
-                    await self._set_status(job_id, "regenerating")
+                    await self._set_status(job_id, "regenerating", request_id=request_id)
 
             # Человек решает всегда: петля могла исчерпаться, но черновик есть,
             # и последнее слово — за контент-менеджером. Порог уверенности
@@ -125,6 +128,7 @@ class CardWorkflow:
                 job_id,
                 "needs_review" if needs_review else "awaiting_approval",
                 result_json=draft_json,
+                request_id=request_id,
             )
             if needs_review:
                 workflow.logger.info(
@@ -136,17 +140,21 @@ class CardWorkflow:
             await workflow.wait_condition(lambda: self._decision is not None)
 
             if self._decision == "approve":
-                await self._set_status(job_id, "approved", result_json=draft_json)
+                await self._set_status(job_id, "approved", result_json=draft_json, request_id=request_id)
             else:
                 await self._set_status(
-                    job_id, "rejected", result_json=draft_json, error="rejected by human"
+                    job_id,
+                    "rejected",
+                    result_json=draft_json,
+                    error="rejected by human",
+                    request_id=request_id,
                 )
             return draft_json
         except Exception as exc:
             # Best effort: если воркер убили, статус останется прежним и
             # процесс продолжится после рестарта — история в Temporal цела.
             try:
-                await self._set_status(job_id, "failed", error=repr(exc))
+                await self._set_status(job_id, "failed", error=repr(exc), request_id=request_id)
             except Exception:
                 workflow.logger.exception("failed to mark job %s as failed", job_id)
             raise
@@ -159,12 +167,13 @@ class CardWorkflow:
         result_json: str | None = None,
         error: str | None = None,
         bump_attempts: bool = False,
+        request_id: str | None = None,
     ) -> None:
         """Статус предметной области — отдельным шагом процесса."""
         self._status = status
         await workflow.execute_activity(
             set_status_activity,
-            args=[job_id, status, result_json, error, bump_attempts],
+            args=[job_id, status, result_json, error, bump_attempts, request_id],
             start_to_close_timeout=STATUS_TIMEOUT,
             retry_policy=STATUS_RETRY,
         )
@@ -200,10 +209,10 @@ class DocumentWorkflow:
     """
 
     @workflow.run
-    async def run(self, document_id: str) -> str:
+    async def run(self, document_id: str, request_id: str | None = None) -> str:
         return await workflow.execute_activity(
             parse_document_activity,
-            document_id,
+            args=[document_id, request_id],
             start_to_close_timeout=DOCUMENT_TIMEOUT,
             retry_policy=DOCUMENT_RETRY,
         )
@@ -223,14 +232,15 @@ class RagCardWorkflow:
         job_id: str,
         document_ids: list[str],
         hint: str | None = None,
+        request_id: str | None = None,
         max_attempts: int = MAX_ATTEMPTS,
         confidence_threshold: float = 0.6,
     ) -> str:
         try:
-            await self._set_status(job_id, "retrieving")
+            await self._set_status(job_id, "retrieving", request_id=request_id)
             context_json = await workflow.execute_activity(
                 retrieve_context_activity,
-                args=[document_ids, hint],
+                args=[document_ids, hint, job_id, request_id],
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 heartbeat_timeout=HEARTBEAT_TIMEOUT,
                 retry_policy=STEP_RETRY,
@@ -242,24 +252,26 @@ class RagCardWorkflow:
             while attempts < max_attempts:
                 attempts += 1
 
-                await self._set_status(job_id, "generating", bump_attempts=True)
+                await self._set_status(job_id, "generating", bump_attempts=True, request_id=request_id)
                 draft_json = await workflow.execute_activity(
                     generate_card_activity,
                     args=[
                         context_json,
                         hint,
                         json.dumps(feedback, ensure_ascii=False) if feedback else None,
+                        job_id,
+                        request_id,
                     ],
                     start_to_close_timeout=ACTIVITY_TIMEOUT,
                     heartbeat_timeout=HEARTBEAT_TIMEOUT,
                     retry_policy=STEP_RETRY,
                 )
 
-                await self._set_status(job_id, "verifying")
+                await self._set_status(job_id, "verifying", request_id=request_id)
                 errors = json.loads(
                     await workflow.execute_activity(
                         verify_citations_activity,
-                        args=[draft_json, context_json],
+                        args=[draft_json, context_json, job_id, request_id],
                         start_to_close_timeout=STATUS_TIMEOUT,
                         retry_policy=STATUS_RETRY,
                     )
@@ -268,14 +280,14 @@ class RagCardWorkflow:
                     feedback = errors
                     workflow.logger.info("citations rejected on attempt %s", attempts)
                     if attempts < max_attempts:
-                        await self._set_status(job_id, "regenerating")
+                        await self._set_status(job_id, "regenerating", request_id=request_id)
                     continue
 
-                await self._set_status(job_id, "critiquing")
+                await self._set_status(job_id, "critiquing", request_id=request_id)
                 report = json.loads(
                     await workflow.execute_activity(
                         critique_card_activity,
-                        args=[draft_json, context_json],
+                        args=[draft_json, context_json, job_id, request_id],
                         start_to_close_timeout=ACTIVITY_TIMEOUT,
                         heartbeat_timeout=HEARTBEAT_TIMEOUT,
                         retry_policy=STEP_RETRY,
@@ -285,26 +297,31 @@ class RagCardWorkflow:
                     break
                 feedback = report.get("issues") or []
                 if attempts < max_attempts:
-                    await self._set_status(job_id, "regenerating")
+                    await self._set_status(job_id, "regenerating", request_id=request_id)
 
             confidence = float(json.loads(draft_json).get("confidence", 0.0))
             await self._set_status(
                 job_id,
                 "needs_review" if confidence < confidence_threshold else "awaiting_approval",
                 result_json=draft_json,
+                request_id=request_id,
             )
             await workflow.wait_condition(lambda: self._decision is not None)
 
             if self._decision == "approve":
-                await self._set_status(job_id, "approved", result_json=draft_json)
+                await self._set_status(job_id, "approved", result_json=draft_json, request_id=request_id)
             else:
                 await self._set_status(
-                    job_id, "rejected", result_json=draft_json, error="rejected by human"
+                    job_id,
+                    "rejected",
+                    result_json=draft_json,
+                    error="rejected by human",
+                    request_id=request_id,
                 )
             return draft_json
         except Exception as exc:
             try:
-                await self._set_status(job_id, "failed", error=repr(exc))
+                await self._set_status(job_id, "failed", error=repr(exc), request_id=request_id)
             except Exception:
                 workflow.logger.exception("failed to mark job %s as failed", job_id)
             raise
@@ -317,11 +334,12 @@ class RagCardWorkflow:
         result_json: str | None = None,
         error: str | None = None,
         bump_attempts: bool = False,
+        request_id: str | None = None,
     ) -> None:
         self._status = status
         await workflow.execute_activity(
             set_status_activity,
-            args=[job_id, status, result_json, error, bump_attempts],
+            args=[job_id, status, result_json, error, bump_attempts, request_id],
             start_to_close_timeout=STATUS_TIMEOUT,
             retry_policy=STATUS_RETRY,
         )

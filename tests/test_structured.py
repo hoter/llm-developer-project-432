@@ -35,7 +35,7 @@ def fake_llm(monkeypatch):
     prompts: list[str] = []
     scenario: list = []
 
-    async def fake_run(agent, prompt):
+    async def fake_run(agent, prompt, **kwargs):
         prompts.append(prompt)
         item = scenario.pop(0)
         if isinstance(item, Exception):

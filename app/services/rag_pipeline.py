@@ -86,7 +86,8 @@ async def critique_card(draft: CardDraft, context: DocumentContext) -> CritiqueR
         + "\n\nСверь каждое утверждение с фрагментом, на который оно ссылается. "
         "Если подтверждения нет — verdict regenerate и конкретные issues."
     )
-    return await call_structured(rag_critic_agent, prompt, CritiqueReport)
+    # Сверка утверждений — служебный вызов: дешёвая модель
+    return await call_structured(rag_critic_agent, prompt, CritiqueReport, aux=True)
 
 
 def verify_citations(draft: CardDraft, context: DocumentContext) -> list[str]:

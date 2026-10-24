@@ -1,4 +1,4 @@
-.PHONY: help infra migrate reindex api temporal-worker test lint
+.PHONY: help infra migrate reindex api temporal-worker test lint eval costs
 
 help:
 	@echo "make infra           - поднять postgres + temporal (docker compose)"
@@ -7,7 +7,8 @@ help:
 	@echo "make api             - FastAPI на :8000"
 	@echo "make temporal-worker - temporal-воркер (workflow + activities)"
 	@echo "make test            - pytest"
-	@echo "make lint            - ruff"
+	@echo "make eval            - метрики на подмножестве (ALL=1 — весь набор)"
+	@echo "make costs           - разбивка вызовов модели по моделям"
 
 infra:
 	docker compose up -d
@@ -29,3 +30,9 @@ test:
 
 lint:
 	ruff check app tests
+
+eval:
+	python -m evals.run $(if $(ALL),--all,)
+
+costs:
+	python -m app.llm.cost

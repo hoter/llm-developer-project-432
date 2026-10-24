@@ -1,6 +1,7 @@
 import logging
 
 import structlog
+from structlog.contextvars import get_contextvars
 
 
 def setup_logging() -> None:
@@ -18,3 +19,8 @@ def setup_logging() -> None:
 
 def get_logger(*args, **kwargs):
     return structlog.get_logger(*args, **kwargs)
+
+
+def current_request_id() -> str | None:
+    """Идентификатор текущего HTTP-запроса из контекста логов."""
+    return get_contextvars().get("request_id")

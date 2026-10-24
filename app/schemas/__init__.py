@@ -10,6 +10,7 @@ from app.schemas.cards import (
     CardDraft,
     Citation,
     CritiqueReport,
+    JudgeVerdict,
     SeoBlock,
     SupplierFacts,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "DocumentOut",
     "GenerateIn",
     "JobIn",
+    "JudgeVerdict",
     "JobOut",
     "SeoBlock",
     "SupplierFacts",

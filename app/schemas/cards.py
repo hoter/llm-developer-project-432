@@ -119,3 +119,13 @@ class CritiqueReport(BaseModel):
         description="Список проблем: заголовок длиннее 60 символов, "
         "выдуманные характеристики, пустые поля и т.п.",
     )
+
+
+class JudgeVerdict(BaseModel):
+    """Вердикт модели-судьи: подтверждаются ли утверждения источниками."""
+
+    supported: bool = Field(description="Все утверждения подтверждены источниками")
+    unsupported_claims: list[str] = Field(
+        default_factory=list, description="Утверждения без подтверждения"
+    )
+

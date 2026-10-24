@@ -6,6 +6,7 @@ retry-политика, таймаут, различие ошибок 429/5xx/4x
 """
 import asyncio
 import random
+import time
 
 from agents import (
     Agent,
@@ -15,9 +16,13 @@ from agents import (
     set_tracing_disabled,
 )
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from structlog.contextvars import get_contextvars
 
+from app.core import db
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.llm.cost import cost_micros_for
+from app.repositories import llm_calls as llm_calls_repo
 
 log = get_logger(__name__)
 
@@ -57,17 +62,34 @@ def _retryable(exc: Exception) -> bool:
     return False
 
 
-async def run_agent(agent: Agent, prompt: str):
-    """Запустить агента с ретраями: экспоненциальная задержка + jitter.
+async def run_agent(agent: Agent, prompt: str, *, role: str | None = None, aux: bool = False):
+    """Запустить агента с ретраями и учётом стоимости.
 
-    Ретраится только вызов LLM — не вся бизнес-задача (это работа очереди/workflow).
+    Ретраится только вызов LLM — не вся бизнес-задача (это работа движка).
+    ``aux=True`` — служебный вызов на дешёвой модели (критик, судья,
+    классификация): сильная модель нужна только основной генерации.
+
+    Учёт пишется здесь, на границе провайдера: вызывающий код не может
+    забыть записать расход. Задача и запрос берутся из контекста логов —
+    их привязывает обработчик и воркер.
     """
     setup_llm()
+    model = settings.llm_aux_model if aux else settings.llm_model
+    if getattr(agent, "model", None) != model:
+        agent = agent.clone(model=model)
+
+    started = time.monotonic()
     max_retries = settings.llm_max_retries
     for attempt in range(1, max_retries + 1):
         try:
             result = await asyncio.wait_for(
                 Runner.run(agent, prompt), timeout=settings.llm_timeout_s
+            )
+            _record_call(
+                role=role or agent.name,
+                model=model,
+                result=result,
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
             return result.final_output
         except Exception as exc:
@@ -88,3 +110,51 @@ async def run_agent(agent: Agent, prompt: str):
                 error=repr(exc),
             )
             await asyncio.sleep(delay)
+
+
+def _usage(result) -> tuple[int, int] | None:
+    """Расход токенов из ответа модели: сумма по всем шагам."""
+    responses = getattr(result, "raw_responses", None)
+    if not responses:
+        return None
+    input_tokens = 0
+    output_tokens = 0
+    for response in responses:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            continue
+        input_tokens += getattr(usage, "input_tokens", 0) or 0
+        output_tokens += getattr(usage, "output_tokens", 0) or 0
+    return input_tokens, output_tokens
+
+
+def _record_call(*, role: str, model: str, result, duration_ms: int) -> None:
+    """Записать вызов в журнал. Сбой учёта не должен ломать генерацию."""
+    usage = _usage(result)
+    if usage is None:
+        return
+    input_tokens, output_tokens = usage
+    context = get_contextvars()
+    log.info(
+        "llm_call",
+        model=model,
+        role=role,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        duration_ms=duration_ms,
+    )
+    try:
+        with db.connection() as conn:
+            llm_calls_repo.record_call(
+                conn,
+                job_id=context.get("job_id"),
+                request_id=context.get("request_id"),
+                model=model,
+                role=role,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_micros=cost_micros_for(model, input_tokens, output_tokens),
+                duration_ms=duration_ms,
+            )
+    except Exception as exc:
+        log.warning("llm_call_not_recorded", error=repr(exc))

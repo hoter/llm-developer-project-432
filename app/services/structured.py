@@ -48,6 +48,7 @@ async def call_structured(
     model_cls: type[BaseModel],
     *,
     max_attempts: int | None = None,
+    aux: bool = False,
 ) -> BaseModel:
     """Вызвать модель и добиться валидного ответа, возвращая ей ошибку.
 
@@ -60,7 +61,7 @@ async def call_structured(
     last_error = "модель не вернула ответ"
 
     for attempt in range(1, attempts + 1):
-        raw = await run_agent(agent, current_prompt)
+        raw = await run_agent(agent, current_prompt, role=agent.name, aux=aux)
         try:
             return parse_and_validate(raw, model_cls)
         except JsonParseError as exc:
@@ -69,7 +70,9 @@ async def call_structured(
             last_error = str(exc)
             if attempt == 1 and len(exc.fields) == 1:
                 field = next(iter(exc.fields))
-                repaired = await _repair_field(agent, raw, model_cls, field, last_error)
+                repaired = await _repair_field(
+                    agent, raw, model_cls, field, last_error, aux=aux
+                )
                 if repaired is not None:
                     log.info("structured_targeted_repair", agent=agent.name, field=field)
                     return repaired
@@ -94,6 +97,8 @@ async def _repair_field(
     model_cls: type[BaseModel],
     field: str,
     error: str,
+    *,
+    aux: bool = False,
 ) -> BaseModel | None:
     """Попросить модель исправить одно поле, остальное оставить как есть."""
     try:
@@ -110,7 +115,7 @@ async def _repair_field(
         + f"\nИсправь ТОЛЬКО поле '{field}', остальные значения оставь без изменений."
         + "\nВерни ТОЛЬКО валидный JSON по схеме, без markdown и пояснений."
     )
-    raw_fixed = await run_agent(agent, prompt)
+    raw_fixed = await run_agent(agent, prompt, role=agent.name, aux=aux)
     try:
         fixed = parse_json(raw_fixed)
     except JsonParseError:

@@ -7,6 +7,15 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:1234/v1"
     llm_api_key: str = "lm-studio"
     llm_model: str = "gemma-4-e4b-it"
+    # Служебные вызовы (критик, судья, классификация) — на дешёвой модели
+    llm_aux_model: str = "gemma-4-e4b-it"
+
+    # Цены в микроединицах за 1M токенов (1e-6 денежной единицы).
+    # Локальная модель бесплатна — поставьте 0; здесь тариф для учёта.
+    llm_price_input_micros_per_1m: int = 150_000
+    llm_price_output_micros_per_1m: int = 600_000
+    llm_aux_price_input_micros_per_1m: int = 50_000
+    llm_aux_price_output_micros_per_1m: int = 200_000
 
     database_url: str = "postgresql://card:card@localhost:5432/card"
 

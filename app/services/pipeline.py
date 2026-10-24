@@ -40,7 +40,8 @@ async def critique(facts: SupplierFacts, draft: CardDraft) -> CritiqueReport:
         + draft.model_dump_json(indent=2)
     )
     log.info("step_critique_start")
-    return await call_structured(critic_agent, prompt, CritiqueReport)
+    # Проверка черновика — служебный вызов: дешёвая модель
+    return await call_structured(critic_agent, prompt, CritiqueReport, aux=True)
 
 
 async def run_pipeline(supplier_text: str, max_attempts: int = 3):

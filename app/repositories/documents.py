@@ -111,3 +111,13 @@ def get_documents(conn: psycopg.Connection, document_ids: list[str]) -> list[dic
         rows = cur.fetchall()
         columns = [column.name for column in cur.description]
     return [dict(zip(columns, row)) for row in rows]
+
+
+def get_documents_meta(conn: psycopg.Connection) -> list[dict]:
+    """Все документы (id, имя, статус) — для разрешения эталонных имён."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, filename, status FROM documents ORDER BY filename")
+        rows = cur.fetchall()
+        columns = [column.name for column in cur.description]
+    return [dict(zip(columns, row)) for row in rows]
+

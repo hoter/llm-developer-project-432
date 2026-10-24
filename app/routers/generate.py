@@ -12,6 +12,7 @@ from temporalio.service import RPCError
 
 from app.core import db
 from app.core.config import settings
+from app.core.logging import current_request_id
 from app.repositories import chunks as chunks_repo
 from app.repositories import documents as documents_repo
 from app.repositories import jobs as jobs_repo
@@ -45,6 +46,7 @@ async def generate(body: GenerateIn):
                 job_id,
                 body.document_ids,
                 body.hint,
+                current_request_id(),
                 MAX_ATTEMPTS,
                 settings.confidence_threshold,
             ],

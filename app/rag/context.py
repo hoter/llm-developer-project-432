@@ -17,6 +17,9 @@ class ContextSource:
     source_id: str
     chunk_id: str
     text: str
+    filename: str | None = None
+    page: int | None = None
+    section: str | None = None
 
 
 @dataclass
@@ -33,6 +36,9 @@ class DocumentContext:
                         "source_id": source.source_id,
                         "chunk_id": source.chunk_id,
                         "text": source.text,
+                        "filename": source.filename,
+                        "page": source.page,
+                        "section": source.section,
                     }
                     for source in self.sources
                 ],
@@ -80,7 +86,16 @@ def build_context(
 
         seen.add(key)
         blocks.append(block)
-        sources.append(ContextSource(source_id=source_id, chunk_id=str(chunk["id"]), text=text))
+        sources.append(
+            ContextSource(
+                source_id=source_id,
+                chunk_id=str(chunk["id"]),
+                text=text,
+                filename=chunk.get("filename"),
+                page=chunk.get("page"),
+                section=chunk.get("section"),
+            )
+        )
         total += len(block) + 2
 
     return DocumentContext(text="\n\n".join(blocks), sources=sources)

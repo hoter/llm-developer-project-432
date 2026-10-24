@@ -45,7 +45,7 @@ def fake_llm(monkeypatch):
     calls = {"n": 0}
     scenario: list = []
 
-    async def fake_run(agent, prompt):
+    async def fake_run(agent, prompt, **kwargs):
         result = scenario[calls["n"]]
         calls["n"] += 1
         if isinstance(result, Exception):
@@ -146,6 +146,10 @@ def test_run_agent_retries_on_429(monkeypatch):
 
     class FakeAgent:
         name = "test"
+        model = None
+
+        def clone(self, **kwargs):
+            return self
 
     monkeypatch.setattr(llm_client, "setup_llm", lambda: None)
     monkeypatch.setattr(llm_client, "Runner", FakeRunner)
@@ -173,6 +177,10 @@ def test_run_agent_no_retry_on_4xx(monkeypatch):
 
     class FakeAgent:
         name = "test"
+        model = None
+
+        def clone(self, **kwargs):
+            return self
 
     monkeypatch.setattr(llm_client, "setup_llm", lambda: None)
     monkeypatch.setattr(llm_client, "Runner", FakeRunner)

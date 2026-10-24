@@ -15,6 +15,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.core import db
 from app.core.config import settings
+from app.core.logging import current_request_id
 from app.rag import retrieval
 from app.repositories import documents as documents_repo
 from app.schemas import DocumentOut
@@ -117,7 +118,7 @@ async def _start_workflow(document_id: str) -> None:
     try:
         await client.start_workflow(
             "DocumentWorkflow",
-            args=[document_id],
+            args=[document_id, current_request_id()],
             id=f"document-{document_id}",
             task_queue=settings.temporal_task_queue,
             id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,

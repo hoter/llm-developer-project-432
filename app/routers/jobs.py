@@ -12,6 +12,7 @@ from temporalio.service import RPCError
 
 from app.core import db
 from app.core.config import settings
+from app.core.logging import current_request_id
 from app.repositories import jobs as jobs_repo
 from app.schemas import JobIn, JobOut
 from app.temporal.client import get_client
@@ -30,7 +31,13 @@ async def _start_workflow(job_id: str, supplier_text: str) -> None:
     try:
         await client.start_workflow(
             "CardWorkflow",
-            args=[job_id, supplier_text, MAX_ATTEMPTS, settings.confidence_threshold],
+            args=[
+                job_id,
+                supplier_text,
+                current_request_id(),
+                MAX_ATTEMPTS,
+                settings.confidence_threshold,
+            ],
             id=job_id,
             task_queue=settings.temporal_task_queue,
             # Тот же ключ идемпотентности не должен запускать второй прогон

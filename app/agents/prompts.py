@@ -14,7 +14,7 @@ import json
 from agents import Agent, ModelSettings
 
 from app.core.config import settings
-from app.schemas import CardDraft, CritiqueReport, SupplierFacts
+from app.schemas import CardDraft, CritiqueReport, JudgeVerdict, SupplierFacts
 
 _MODEL = settings.llm_model
 
@@ -126,6 +126,25 @@ rag_critic_agent = Agent(
         'Верни СТРОГО JSON: {"verdict": "approve" | "regenerate", "issues": [...]}. '
         "В issues — конкретное расхождение и поле карточки.\n\n"
         "Схема ответа:\n" + _schema_text(CritiqueReport)
+    ),
+    model=_MODEL,
+    model_settings=_MODEL_SETTINGS,
+)
+
+
+
+judge_agent = Agent(
+    name="Judge",
+    instructions=(
+        "Ты — судья качества карточки товара. Тебе даны фрагменты документов "
+        "с метками [S1], [S2], … и карточка со ссылками sources.\n"
+        "Проверь, подтверждается ли каждое утверждение карточки (характеристики, "
+        "описание, преимущества) источником, на который оно ссылается.\n"
+        "Не оценивай стиль и полноту — только подтверждённость источниками.\n"
+        "supported=true только если ВСЕ утверждения подтверждены.\n"
+        "В unsupported_claims перечисли конкретные утверждения без подтверждения.\n"
+        "Верни СТРОГО JSON по схеме.\n\n"
+        "Схема ответа:\n" + _schema_text(JudgeVerdict)
     ),
     model=_MODEL,
     model_settings=_MODEL_SETTINGS,

@@ -5,13 +5,15 @@ Activities выполняются вне песочницы workflow: можно
 Temporal сериализует их в историю процесса, Pydantic-валидация происходит
 на границе шага.
 
-Статус предметной области пишется отдельной activity, а не внутри пайплайна:
-шаг генерации минутами ждёт модель, а короткая запись в базу не должна
-удерживать ни соединение, ни внимание движка.
+Каждый вызов оборачивается контекстом логов: job_id приходит аргументом
+процесса, request_id — из HTTP-запроса, который его запустил. Поэтому один
+поиск по job_id показывает весь путь: обработчик, шаги, вызовы модели.
 """
 import asyncio
 import json
+from contextlib import contextmanager
 
+from structlog.contextvars import bound_contextvars
 from temporalio import activity
 
 from app.core import db
@@ -30,6 +32,18 @@ log = get_logger(__name__)
 HEARTBEAT_INTERVAL_S = 10
 
 
+@contextmanager
+def activity_context(job_id: str | None = None, request_id: str | None = None):
+    """Привязать задачу и запрос к контексту логов на время activity."""
+    values = {}
+    if job_id:
+        values["job_id"] = job_id
+    if request_id:
+        values["request_id"] = request_id
+    with bound_contextvars(**values):
+        yield
+
+
 async def _with_heartbeat(coro):
     async def _beat() -> None:
         while True:
@@ -44,25 +58,40 @@ async def _with_heartbeat(coro):
 
 
 @activity.defn
-async def extract_activity(supplier_text: str) -> str:
-    facts = await _with_heartbeat(pipeline.extract(supplier_text))
-    return facts.model_dump_json()
+async def extract_activity(
+    supplier_text: str, job_id: str | None = None, request_id: str | None = None
+) -> str:
+    with activity_context(job_id, request_id):
+        facts = await _with_heartbeat(pipeline.extract(supplier_text))
+        return facts.model_dump_json()
 
 
 @activity.defn
-async def generate_activity(facts_json: str, feedback_json: str | None = None) -> str:
-    facts = SupplierFacts.model_validate_json(facts_json)
-    feedback = json.loads(feedback_json) if feedback_json else None
-    draft = await _with_heartbeat(pipeline.generate(facts, feedback))
-    return draft.model_dump_json()
+async def generate_activity(
+    facts_json: str,
+    feedback_json: str | None = None,
+    job_id: str | None = None,
+    request_id: str | None = None,
+) -> str:
+    with activity_context(job_id, request_id):
+        facts = SupplierFacts.model_validate_json(facts_json)
+        feedback = json.loads(feedback_json) if feedback_json else None
+        draft = await _with_heartbeat(pipeline.generate(facts, feedback))
+        return draft.model_dump_json()
 
 
 @activity.defn
-async def critique_activity(facts_json: str, draft_json: str) -> str:
-    facts = SupplierFacts.model_validate_json(facts_json)
-    draft = CardDraft.model_validate_json(draft_json)
-    report = await _with_heartbeat(pipeline.critique(facts, draft))
-    return report.model_dump_json()
+async def critique_activity(
+    facts_json: str,
+    draft_json: str,
+    job_id: str | None = None,
+    request_id: str | None = None,
+) -> str:
+    with activity_context(job_id, request_id):
+        facts = SupplierFacts.model_validate_json(facts_json)
+        draft = CardDraft.model_validate_json(draft_json)
+        report = await _with_heartbeat(pipeline.critique(facts, draft))
+        return report.model_dump_json()
 
 
 @activity.defn
@@ -72,6 +101,7 @@ def set_status_activity(
     result_json: str | None = None,
     error: str | None = None,
     bump_attempts: bool = False,
+    request_id: str | None = None,
 ) -> None:
     """Синхронная activity: короткое обращение к базе.
 
@@ -79,57 +109,84 @@ def set_status_activity(
     (activity_executor в app/temporal_worker.py). Соединение берём на
     операцию и сразу возвращаем в пул.
     """
-    result = CardDraft.model_validate_json(result_json) if result_json else None
-    with db.connection() as conn:
-        jobs_repo.set_status(
-            conn,
-            job_id,
-            status,
-            result=result,
-            error=error,
-            bump_attempts=bump_attempts,
-        )
-    log.info("job_status", job_id=job_id, status=status)
+    with activity_context(job_id, request_id):
+        result = CardDraft.model_validate_json(result_json) if result_json else None
+        with db.connection() as conn:
+            jobs_repo.set_status(
+                conn,
+                job_id,
+                status,
+                result=result,
+                error=error,
+                bump_attempts=bump_attempts,
+            )
+        log.info("job_status", job_id=job_id, status=status)
 
 
 @activity.defn
-def parse_document_activity(document_id: str) -> str:
+def parse_document_activity(document_id: str, request_id: str | None = None) -> str:
     """Разбор документа: диск + база, синхронно, в пуле потоков воркера.
 
     Возвращает новый статус документа («indexed» или «failed»). Отказ с
     причиной — нормальный исход: скан без текстового слоя не индексируется.
     """
-    return documents_service.ingest_document(document_id)
+    with activity_context(request_id=request_id):
+        return documents_service.ingest_document(document_id)
 
 
 @activity.defn
-def retrieve_context_activity(document_ids: list[str], hint: str | None = None) -> str:
+def retrieve_context_activity(
+    document_ids: list[str],
+    hint: str | None = None,
+    job_id: str | None = None,
+    request_id: str | None = None,
+) -> str:
     """Поиск и сборка контекста: embeddings + SQL, синхронно в пуле потоков."""
-    return rag_pipeline.retrieve_context(document_ids, hint).to_json()
+    with activity_context(job_id, request_id):
+        return rag_pipeline.retrieve_context(document_ids, hint).to_json()
 
 
 @activity.defn
 async def generate_card_activity(
-    context_json: str, hint: str | None = None, feedback_json: str | None = None
+    context_json: str,
+    hint: str | None = None,
+    feedback_json: str | None = None,
+    job_id: str | None = None,
+    request_id: str | None = None,
 ) -> str:
-    context = DocumentContext.from_json(context_json)
-    feedback = json.loads(feedback_json) if feedback_json else None
-    draft = await _with_heartbeat(rag_pipeline.generate_card(context, hint, feedback))
-    return draft.model_dump_json()
+    with activity_context(job_id, request_id):
+        context = DocumentContext.from_json(context_json)
+        feedback = json.loads(feedback_json) if feedback_json else None
+        draft = await _with_heartbeat(
+            rag_pipeline.generate_card(context, hint, feedback)
+        )
+        return draft.model_dump_json()
 
 
 @activity.defn
-def verify_citations_activity(draft_json: str, context_json: str) -> str:
+def verify_citations_activity(
+    draft_json: str,
+    context_json: str,
+    job_id: str | None = None,
+    request_id: str | None = None,
+) -> str:
     """Проверка ссылок: фрагмент существует и был в контексте (SQL + память)."""
-    draft = CardDraft.model_validate_json(draft_json)
-    context = DocumentContext.from_json(context_json)
-    errors = rag_pipeline.verify_citations(draft, context)
-    return json.dumps(errors, ensure_ascii=False)
+    with activity_context(job_id, request_id):
+        draft = CardDraft.model_validate_json(draft_json)
+        context = DocumentContext.from_json(context_json)
+        errors = rag_pipeline.verify_citations(draft, context)
+        return json.dumps(errors, ensure_ascii=False)
 
 
 @activity.defn
-async def critique_card_activity(draft_json: str, context_json: str) -> str:
-    draft = CardDraft.model_validate_json(draft_json)
-    context = DocumentContext.from_json(context_json)
-    report = await _with_heartbeat(rag_pipeline.critique_card(draft, context))
-    return report.model_dump_json()
+async def critique_card_activity(
+    draft_json: str,
+    context_json: str,
+    job_id: str | None = None,
+    request_id: str | None = None,
+) -> str:
+    with activity_context(job_id, request_id):
+        draft = CardDraft.model_validate_json(draft_json)
+        context = DocumentContext.from_json(context_json)
+        report = await _with_heartbeat(rag_pipeline.critique_card(draft, context))
+        return report.model_dump_json()
