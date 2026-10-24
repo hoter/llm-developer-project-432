@@ -13,6 +13,11 @@ xlsx, строит по ним поисковый индекс и генерир
 
 Учебный проект Хекслета: https://ru.hexlet.io/programs/llm-developer
 
+Что сдаётся: код и миграции, тесты, архитектурные решения
+([docs/decisions.md](docs/decisions.md)), отчёт о прогоне
+([REPORT.md](REPORT.md)) и ответы на вопросы защиты
+([docs/defense.md](docs/defense.md)).
+
 
 ## Стек
 
@@ -38,6 +43,10 @@ cp .env.example .env
 ```
 
 Затем впишите модель из `curl localhost:1234/v1/models` в `LLM_MODEL`.
+
+Модель эмбеддингов (`intfloat/multilingual-e5-large`, ~2.2 ГБ) скачается
+сама при первом обращении к поиску — нужен интернет. Модель генерации
+поднимается отдельно (LM Studio на `localhost:1234`).
 
 ## Инфраструктура
 
@@ -71,7 +80,7 @@ docker compose ps     # postgres и temporal должны быть running (heal
 ```bash
 make migrate
 # первый запуск:  применена миграция 0001_init
-#                 применена миграция 0002_jobs
+#                 … 0002_jobs … 0006_guard_report
 # второй запуск:  новых миграций нет
 ```
 
@@ -85,6 +94,39 @@ make migrate
 make api              # FastAPI на :8000 (терминал 1)
 make temporal-worker  # Temporal-воркер (терминал 2)
 ```
+
+## Быстрый старт
+
+```bash
+make infra            # postgres + temporal
+make migrate          # схема с нуля
+make api              # терминал 1: FastAPI :8000
+make temporal-worker  # терминал 2: воркер процессов
+
+# загрузка документов поставщика
+for f in data/*.pdf data/*.docx data/*.xlsx; do
+  curl -s -X POST localhost:8000/documents -F "file=@$f"; echo
+done
+
+# карточка по выбранным документам
+curl -X POST localhost:8000/generate -H 'Content-Type: application/json' -d '{
+  "document_ids": ["<id из ответа /documents>"],
+  "hint": "блендер МиксерПро 800"
+}'
+curl localhost:8000/generate/<id>          # статус и карточка со ссылками
+curl -X POST localhost:8000/generate/<id>/approve
+```
+
+Полный сброс и проверка с нуля:
+
+```bash
+docker compose down -v   # удалить тома, не только контейнеры
+rm -rf data/uploads && mkdir -p data/uploads
+make infra && make migrate
+```
+
+Отчёт о приёмке: [REPORT.md](REPORT.md). Ответы на вопросы защиты:
+[docs/defense.md](docs/defense.md).
 
 ## API
 

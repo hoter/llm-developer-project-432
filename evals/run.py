@@ -15,7 +15,7 @@ from pathlib import Path
 from app.core import db
 from app.core.logging import setup_logging
 from app.repositories import documents as documents_repo
-from app.services.rag_pipeline import run_pipeline
+from app.services.rag_pipeline import GuardrailsBlocked, NoContextError, run_pipeline
 from evals.judge import judge_card
 from evals.metrics import characteristic_match, citation_support
 
@@ -44,7 +44,13 @@ async def evaluate(use_all: bool) -> dict:
             )
             continue
 
-        result = await run_pipeline([document["id"]], hint=expected.get("product"))
+        try:
+            result = await run_pipeline([document["id"]], hint=expected.get("product"))
+        except (GuardrailsBlocked, NoContextError) as exc:
+            rows.append({"document": filename, "skipped": f"защита: {exc}"})
+            print(f"  {filename:24} пропущен: {exc}")
+            continue
+
         characteristics = characteristic_match(
             expected.get("characteristics", {}), result.draft.characteristics
         )
