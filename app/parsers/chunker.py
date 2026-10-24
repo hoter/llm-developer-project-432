@@ -1,64 +1,72 @@
-"""Резка на фрагменты.
+"""Резка на фрагменты: текст с перекрытием, таблицы по строкам.
 
-Текст режется фиксированным размером с перекрытием: утверждение на границе
-не должно потеряться. Таблица режется по строкам: строку рвать нельзя, и
-каждый фрагмент несёт заголовки колонок — иначе «800» без «Мощность, Вт»
-бессмысленно.
-
-Каждый фрагмент уносит метаданные: документ, страницу, секцию, артикул,
-бренд.
+Строку таблицы рвать нельзя; каждый фрагмент несёт заголовки колонок и
+метаданные: документ, страницу, секцию, артикул.
 """
-from dataclasses import dataclass, field
-
-from app.parsers import Block
+from app.parsers import Block, row_to_text
 
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 180
 
 
-@dataclass
-class Chunk:
-    text: str
-    page: int | None
-    section: str
-    article: str | None = None
-    brand: str | None = None
-    metadata: dict = field(default_factory=dict)
+def chunk_blocks(blocks: list[Block], doc_id: str) -> list[dict]:
+    """Разрезать блоки на фрагменты-словари."""
+    chunks: list[dict] = []
+    text_group: list[Block] = []
 
+    def flush() -> None:
+        if not text_group:
+            return
+        first = text_group[0]
+        metadata = first.metadata
+        text = "\n".join(block.content for block in text_group)
+        for piece in split_text(text, CHUNK_SIZE, CHUNK_OVERLAP):
+            chunks.append(
+                {
+                    "text": piece,
+                    "metadata": {
+                        "doc_id": doc_id,
+                        "page": metadata.get("page"),
+                        "section": metadata.get("section") or "",
+                    },
+                }
+            )
+        text_group.clear()
 
-def chunk_blocks(
-    blocks: list[Block],
-    *,
-    document: str,
-    size: int = CHUNK_SIZE,
-    overlap: int = CHUNK_OVERLAP,
-) -> list[Chunk]:
-    """Разрезать блоки документа на фрагменты."""
-    chunks: list[Chunk] = []
-    for group in _groups(blocks):
-        if group[0].kind == "table":
-            chunks.extend(_table_chunks(group, document))
-        else:
-            chunks.extend(_text_chunks(group, document, size, overlap))
+    for block in blocks:
+        if block.kind == "table":
+            flush()
+            chunks.extend(_table_chunks(block, doc_id))
+            continue
+        if text_group:
+            previous = text_group[0].metadata
+            current = block.metadata
+            same = (
+                previous.get("page") == current.get("page")
+                and (previous.get("section") or "") == (current.get("section") or "")
+            )
+            if not same:
+                flush()
+        text_group.append(block)
+    flush()
     return chunks
 
 
-def split_text(text: str, size: int, overlap: int) -> list[str]:
-    """Нарезать текст по словам с перекрытием."""
+def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
     text = text.strip()
     if not text:
         return []
     if len(text) <= size:
         return [text]
 
-    chunks: list[str] = []
+    pieces: list[str] = []
     current: list[str] = []
     current_len = 0
 
     for word in text.split():
         addition = len(word) + (1 if current else 0)
         if current and current_len + addition > size:
-            chunks.append(" ".join(current))
+            pieces.append(" ".join(current))
             tail: list[str] = []
             tail_len = 0
             for previous in reversed(current):
@@ -69,72 +77,41 @@ def split_text(text: str, size: int, overlap: int) -> list[str]:
             current = tail
             current_len = tail_len
             addition = len(word) + (1 if current else 0)
-
         current.append(word)
         current_len += addition
 
     if current:
-        chunks.append(" ".join(current))
+        pieces.append(" ".join(current))
+    return pieces
+
+
+def _table_chunks(block: Block, doc_id: str) -> list[dict]:
+    rows = block.rows
+    if len(rows) < 2:
+        return []
+    headers = rows[0]
+    page = block.metadata.get("page")
+    section = block.metadata.get("section") or ""
+
+    chunks: list[dict] = []
+    for row in rows[1:]:
+        text, articul = _row_text(headers, row)
+        if not text:
+            continue
+        metadata = {
+            "doc_id": doc_id,
+            "page": page,
+            "section": section,
+        }
+        if articul:
+            metadata["articul"] = articul
+        chunks.append({"text": text, "metadata": metadata})
     return chunks
 
 
-def _groups(blocks: list[Block]) -> list[list[Block]]:
-    """Подряд идущие блоки с одной страницей, секцией и видом."""
-    groups: list[list[Block]] = []
-    for block in blocks:
-        if groups:
-            last = groups[-1][0]
-            if (
-                block.kind == last.kind
-                and block.page == last.page
-                and block.section == last.section
-                and block.kind == "text"
-            ):
-                groups[-1].append(block)
-                continue
-        groups.append([block])
-    return groups
-
-
-def _text_chunks(
-    group: list[Block], document: str, size: int, overlap: int
-) -> list[Chunk]:
-    text = "\n".join(block.text for block in group)
-    first = group[0]
-    chunks = []
-    for piece in split_text(text, size, overlap):
-        chunks.append(
-            Chunk(
-                text=piece,
-                page=first.page,
-                section=first.section or "Документ",
-                metadata={"document": document, "kind": "text"},
-            )
-        )
-    return chunks
-
-
-def _table_chunks(group: list[Block], document: str) -> list[Chunk]:
-    """Каждая строка — отдельный фрагмент с заголовками колонок."""
-    chunks: list[Chunk] = []
-    for block in group:
-        headers = [str(h).strip() for h in (block.metadata.get("headers") or []) if str(h).strip()]
-        header_line = "Колонки: " + " | ".join(headers) if headers else ""
-        text = f"{header_line}\n{block.text}".strip() if header_line else block.text
-        chunks.append(
-            Chunk(
-                text=text,
-                page=block.page,
-                section=block.section or "Документ",
-                article=block.article,
-                brand=block.brand,
-                metadata={
-                    "document": document,
-                    "kind": "table",
-                    "headers": headers,
-                    "row": block.metadata.get("row"),
-                    "sheet": block.metadata.get("sheet"),
-                },
-            )
-        )
-    return chunks
+def _row_text(headers: list[str], row: list[str]) -> tuple[str, str | None]:
+    if len(headers) == 2 and headers[0].strip().lower() in {"параметр", "показатель"}:
+        name = row[0].strip() if row else ""
+        value = row[1].strip() if len(row) > 1 else ""
+        return (f"{name}: {value}" if name else value), None
+    return row_to_text(headers, row)

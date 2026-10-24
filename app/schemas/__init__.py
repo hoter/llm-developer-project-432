@@ -1,21 +1,20 @@
-"""Контракты приложения.
-
-`app.schemas` — пакет: карточка и её части в cards.py, задачи в jobs.py.
-Реэкспорт оставлен, чтобы код мог писать `from app.schemas import CardDraft`.
-"""
+"""Контракты приложения: карточка, задачи, служебные вердикты."""
 from app.schemas.cards import (
     SEO_DESCRIPTION_MAX_LENGTH,
     SEO_TITLE_MAX_LENGTH,
     TITLE_MAX_LENGTH,
     CardDraft,
-    Citation,
     CritiqueReport,
     InjectionVerdict,
     JudgeVerdict,
+    Seo,
     SeoBlock,
+    SourceRef,
     SupplierFacts,
 )
 from app.schemas.jobs import DocumentOut, GenerateIn, JobIn, JobOut
+
+Citation = SourceRef
 
 __all__ = [
     "SEO_DESCRIPTION_MAX_LENGTH",
@@ -28,8 +27,10 @@ __all__ = [
     "GenerateIn",
     "InjectionVerdict",
     "JobIn",
-    "JudgeVerdict",
     "JobOut",
+    "JudgeVerdict",
+    "Seo",
     "SeoBlock",
+    "SourceRef",
     "SupplierFacts",
 ]

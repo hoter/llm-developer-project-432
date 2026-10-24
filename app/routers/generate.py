@@ -87,23 +87,20 @@ async def request_changes(job_id: str):
 def _enrich_sources(conn, result: dict) -> None:
     """Дописать к каждой ссылке документ, страницу, секцию и текст фрагмента."""
     citations = result.get("sources") or []
-    ids = [
-        int(citation["chunk_id"])
-        for citation in citations
-        if str(citation.get("chunk_id", "")).isdigit()
-    ]
+    ids = [str(citation["chunk_id"]) for citation in citations if citation.get("chunk_id")]
     chunks = chunks_repo.get_chunks_by_ids(conn, ids)
     for citation in citations:
         chunk = chunks.get(str(citation.get("chunk_id")))
         if chunk:
+            metadata = chunk.get("metadata") or {}
             citation.update(
                 {
-                    "document": chunk["filename"],
-                    "page": chunk["page"],
-                    "section": chunk["section"],
-                    "article": chunk["article"],
-                    "brand": chunk["brand"],
-                    "text": chunk["text"],
+                    "document": chunk.get("filename"),
+                    "page": metadata.get("page"),
+                    "section": metadata.get("section"),
+                    "article": metadata.get("articul"),
+                    "brand": metadata.get("brand"),
+                    "text": chunk.get("text"),
                 }
             )
 

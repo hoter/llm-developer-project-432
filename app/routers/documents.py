@@ -64,10 +64,10 @@ async def upload_document(file: UploadFile = File(...)):
             conn,
             document_id=document_id,
             filename=filename,
-            content_type=file.content_type,
-            extension=extension,
+            content_hash=digest,
+            kind=extension.lstrip("."),
             size_bytes=len(data),
-            sha256=digest,
+            content_type=file.content_type,
             stored_path=str(stored_path),
         )
 

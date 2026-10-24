@@ -1,111 +1,89 @@
-"""Валидация с лечением и точечная переделка одного поля."""
+"""Контракт карточки: валидация с лечением и точечная переделка."""
 import asyncio
 import json
 
 import pytest
 
-from app.schemas import CardDraft
+from app.schemas import CardDraft, Seo, SourceRef
 from app.services import structured
-
-
-class FakeAgent:
-    name = "Generator"
 
 
 def _card(**overrides) -> dict:
     data = {
-        "title": "Блендер 800 Вт",
-        "description": "Погружной блендер с металлической ножкой.",
+        "title": "МиксерПро 800 — блендер",
+        "description": "Погружной блендер.",
         "characteristics": {"Мощность": "800 Вт"},
         "benefits": ["Металлическая ножка"],
-        "missing_fields": ["Гарантия"],
+        "seo": {"title": "Блендер", "description": "Мощный", "keywords": ["блендер"]},
+        "sources": [{"chunk_id": "c1", "doc_id": "d1", "page": 3, "score": 0.9}],
+        "missing_fields": [],
         "confidence": 0.8,
-        "seo": {"title": "Блендер 800 Вт", "description": "Блендер 800 Вт", "keywords": []},
     }
     data.update(overrides)
     return data
 
 
-def _json(**overrides) -> str:
-    return json.dumps(_card(**overrides), ensure_ascii=False)
+def test_schema_defaults_and_limits():
+    assert Seo().title == "" and Seo().keywords == []
+    ref = SourceRef(chunk_id="c1")
+    assert ref.doc_id == "" and ref.page is None and ref.score is None
+
+    with pytest.raises(Exception):
+        CardDraft.model_validate(_card(title="A" * 61))
+    with pytest.raises(Exception):
+        CardDraft.model_validate(_card(confidence=1.5))
+
+    card = CardDraft.model_validate(_card(characteristics={"Мощность": "800 Вт", "Цвет": " "}))
+    assert "Цвет" not in card.characteristics
 
 
-@pytest.fixture
-def fake_llm(monkeypatch):
-    prompts: list[str] = []
-    scenario: list = []
+def _patch(monkeypatch, scenario):
+    calls = []
 
-    async def fake_run(agent, prompt, **kwargs):
-        prompts.append(prompt)
-        item = scenario.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
+    async def fake_run(agent, prompt):
+        calls.append(prompt)
+        item = scenario[len(calls) - 1]
+        return json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else item
 
     monkeypatch.setattr(structured, "run_agent", fake_run)
-    return prompts, scenario
+    return calls
 
 
-def test_invalid_json_asks_model_again_with_error(fake_llm):
-    prompts, scenario = fake_llm
-    scenario += ["это совсем не JSON", _json()]
-
-    card = asyncio.run(structured.call_structured(FakeAgent(), "сделай карточку", CardDraft))
-
-    assert isinstance(card, CardDraft)
-    assert len(prompts) == 2
-    assert "ответ не является JSON" in prompts[1]
-    assert "сделай карточку" in prompts[1]
+def test_validate_or_retry_success(monkeypatch):
+    calls = _patch(monkeypatch, [_card()])
+    card = asyncio.run(structured.validate_or_retry("промпт"))
+    assert card.title.startswith("МиксерПро")
+    assert len(calls) == 1
 
 
-def test_empty_response_gives_clear_error(fake_llm):
-    prompts, scenario = fake_llm
-    scenario += [""]
-
-    with pytest.raises(structured.StructuredOutputError, match="не удалось получить"):
-        asyncio.run(
-            structured.call_structured(FakeAgent(), "сделай карточку", CardDraft, max_attempts=1)
-        )
-    assert len(prompts) == 1
+def test_validate_or_retry_sends_error_back(monkeypatch):
+    calls = _patch(monkeypatch, [_card(title="A" * 80), _card()])
+    card = asyncio.run(structured.validate_or_retry("промпт"))
+    assert len(calls) == 2
+    assert "60" in calls[1]
+    assert card.title == _card()["title"]
 
 
-def test_long_title_repaired_targeted(fake_llm):
-    """Заголовок починили точечно: описание из первого ответа не переделывали."""
-    prompts, scenario = fake_llm
-    long_title = "Очень длинный заголовок блендера, который точно не влезет в лимит"
-    first_description = "Описание, которое трогать нельзя."
-    scenario += [
-        _json(title=long_title, description=first_description),
-        _json(title="Блендер 800 Вт"),
-    ]
-
-    card = asyncio.run(structured.call_structured(FakeAgent(), "сделай карточку", CardDraft))
-
-    assert card.title == "Блендер 800 Вт"
-    assert card.description == first_description
-    assert len(prompts) == 2
-    assert "Исправь ТОЛЬКО поле 'title'" in prompts[1]
-    assert "Текущий черновик" in prompts[1]
-    assert long_title in prompts[1]
+def test_validate_or_retry_gives_up(monkeypatch):
+    _patch(monkeypatch, [_card(title="A" * 80)] * 3)
+    with pytest.raises(structured.CardValidationError):
+        asyncio.run(structured.validate_or_retry("промпт"))
 
 
-def test_invalid_after_attempts_raises(fake_llm):
-    _, scenario = fake_llm
-    scenario += ["мусор", "ещё мусор", "и снова мусор"]
+def test_regenerate_only_one_field(monkeypatch):
+    original = CardDraft.model_validate(_card())
+    fixed = CardDraft.model_validate(_card(title="Короткий заголовок"))
 
-    with pytest.raises(structured.StructuredOutputError):
-        asyncio.run(
-            structured.call_structured(
-                FakeAgent(), "сделай карточку", CardDraft, max_attempts=2
-            )
-        )
+    async def fake_run(agent, prompt):
+        assert "title" in prompt
+        return fixed.model_dump_json()
+
+    monkeypatch.setattr(structured, "run_agent", fake_run)
+    result = asyncio.run(structured.regenerate_field(original, "title", "длинно"))
+    assert result.title == "Короткий заголовок"
+    assert result.description == original.description
 
 
-def test_validation_error_message_mentions_field(fake_llm):
-    prompts, scenario = fake_llm
-    scenario += [_json(title="Б" * 90), _json()]
-
-    asyncio.run(structured.call_structured(FakeAgent(), "сделай карточку", CardDraft))
-
-    assert "title" in prompts[1]
-    assert "60" in prompts[1] or "at most" in prompts[1]
+def test_confidence_gate():
+    assert structured.confidence_gate(CardDraft.model_validate(_card(confidence=0.3))) == "needs_review"
+    assert structured.confidence_gate(CardDraft.model_validate(_card(confidence=0.87))) == "done"

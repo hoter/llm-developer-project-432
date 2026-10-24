@@ -1,12 +1,11 @@
--- 0004: векторная колонка и полнотекстовый поиск по фрагментам.
+-- 0004: векторная колонка и полнотекстовый поиск.
 --
--- Метрика расстояния — косинус (vector_cosine_ops). Она выбирается один раз:
--- HNSW-индекс строится под неё, и менять метрику задним числом нельзя.
--- Полнотекстовая колонка генерируемая: tsv всегда соответствует text.
+-- Метрика — косинус: HNSW строится под неё, менять задним числом нельзя.
+-- Размерность вектора фиксирована моделью эмбеддингов (768).
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
-ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding vector(1024);
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding vector(768);
 
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS tsv tsvector
     GENERATED ALWAYS AS (to_tsvector('russian', text)) STORED;

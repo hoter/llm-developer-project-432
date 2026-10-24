@@ -16,7 +16,7 @@ from app.repositories import chunks as chunks_repo
 log = get_logger(__name__)
 
 
-def index_pending(*, document_id: str | None = None, batch_size: int | None = None) -> int:
+def index_pending(*, doc_id: str | None = None, batch_size: int | None = None) -> int:
     """Досчитать векторы. Возвращает число проиндексированных фрагментов."""
     size = batch_size or settings.embedding_batch_size
     indexed = 0
@@ -24,7 +24,7 @@ def index_pending(*, document_id: str | None = None, batch_size: int | None = No
     while True:
         with db.connection() as conn:
             rows = chunks_repo.chunks_without_embedding(
-                conn, limit=size, document_id=document_id
+                conn, limit=size, doc_id=doc_id
             )
         if not rows:
             break
@@ -36,7 +36,7 @@ def index_pending(*, document_id: str | None = None, batch_size: int | None = No
         with db.connection() as conn:
             chunks_repo.set_embeddings(
                 conn,
-                [(vector, row["id"]) for vector, row in zip(vectors, rows)],
+                [(vector, row["chunk_id"]) for vector, row in zip(vectors, rows)],
             )
 
         indexed += len(rows)
@@ -47,7 +47,7 @@ def index_pending(*, document_id: str | None = None, batch_size: int | None = No
 
 def index_document(document_id: str) -> int:
     """Индексация сразу после разбора — продолжение цепочки."""
-    return index_pending(document_id=document_id)
+    return index_pending(doc_id=document_id)
 
 
 def main() -> None:

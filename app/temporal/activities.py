@@ -1,13 +1,7 @@
 """Temporal-activities: единственные места, где шагу процесса разрешены side-effects.
 
-Activities выполняются вне песочницы workflow: можно ходить в базу, в LLM,
-читать файлы. Между workflow и activities данные передаём JSON-строками —
-Temporal сериализует их в историю процесса, Pydantic-валидация происходит
-на границе шага.
-
 Каждый вызов оборачивается контекстом логов: job_id приходит аргументом
-процесса, request_id — из HTTP-запроса, который его запустил. Поэтому один
-поиск по job_id показывает весь путь: обработчик, шаги, вызовы модели.
+процесса, request_id — из HTTP-запроса, который его запустил.
 """
 import asyncio
 import json
@@ -18,7 +12,7 @@ from temporalio import activity
 
 from app.core import db
 from app.core.logging import get_logger
-from app.rag.context import DocumentContext
+from app.guardrails import guard_output
 from app.repositories import jobs as jobs_repo
 from app.schemas import CardDraft, SupplierFacts
 from app.services import documents as documents_service
@@ -26,15 +20,11 @@ from app.services import pipeline, rag_pipeline
 
 log = get_logger(__name__)
 
-# Как часто долгий шаг отмечается в движке. По heartbeat_timeout движок
-# понимает, что воркер умер, и отдаёт шаг на повтор другому воркеру —
-# не дожидаясь start_to_close_timeout в несколько минут.
 HEARTBEAT_INTERVAL_S = 10
 
 
 @contextmanager
 def activity_context(job_id: str | None = None, request_id: str | None = None):
-    """Привязать задачу и запрос к контексту логов на время activity."""
     values = {}
     if job_id:
         values["job_id"] = job_id
@@ -103,18 +93,11 @@ def set_status_activity(
     bump_attempts: bool = False,
     request_id: str | None = None,
 ) -> None:
-    """Синхронная activity: короткое обращение к базе.
-
-    Не отдаёт управление, поэтому воркер запускает её в пуле потоков
-    (activity_executor в app/temporal_worker.py). Соединение берём на
-    операцию и сразу возвращаем в пул.
-    """
     with activity_context(job_id, request_id):
-        result = (
-            rag_pipeline.sanitize_card(CardDraft.model_validate_json(result_json))
-            if result_json
-            else None
-        )
+        result = None
+        if result_json:
+            cleaned, _issues = guard_output(result_json)
+            result = CardDraft.model_validate_json(cleaned)
         with db.connection() as conn:
             jobs_repo.set_status(
                 conn,
@@ -129,11 +112,6 @@ def set_status_activity(
 
 @activity.defn
 def parse_document_activity(document_id: str, request_id: str | None = None) -> str:
-    """Разбор документа: диск + база, синхронно, в пуле потоков воркера.
-
-    Возвращает новый статус документа («indexed» или «failed»). Отказ с
-    причиной — нормальный исход: скан без текстового слоя не индексируется.
-    """
     with activity_context(request_id=request_id):
         return documents_service.ingest_document(document_id)
 
@@ -145,75 +123,76 @@ async def retrieve_context_activity(
     job_id: str | None = None,
     request_id: str | None = None,
 ) -> str:
-    """Поиск, проверка на инъекции и сборка контекста с маскированием PII."""
     with activity_context(job_id, request_id):
-        guarded = await _with_heartbeat(
-            rag_pipeline.retrieve_and_guard(document_ids, hint)
+        context, report = await _with_heartbeat(
+            rag_pipeline.retrieve_context_async(hint or "", document_ids)
         )
-        return guarded.to_json()
+        return json.dumps(
+            {
+                "context": context,
+                "report": {
+                    "masked_pii": report.masked_pii,
+                    "suspicious_chunks": report.suspicious_chunks,
+                    "needs_review": report.needs_review,
+                },
+            },
+            ensure_ascii=False,
+        )
 
 
 @activity.defn
 def set_guard_report_activity(
     job_id: str, report_json: str, request_id: str | None = None
 ) -> None:
-    """Отчёт защиты по задаче: что замаскировано и что исключено."""
     with activity_context(job_id, request_id):
         with db.connection() as conn:
             jobs_repo.set_guard_report(conn, job_id, json.loads(report_json))
 
 
 @activity.defn
-def output_guard_activity(
-    draft_json: str, job_id: str | None = None, request_id: str | None = None
-) -> str:
-    """Фильтр выхода: PII и следы служебных инструкций в готовой карточке."""
-    with activity_context(job_id, request_id):
-        draft = CardDraft.model_validate_json(draft_json)
-        return json.dumps(rag_pipeline.check_output(draft), ensure_ascii=False)
-
-
-@activity.defn
 async def generate_card_activity(
-    context_json: str,
+    context: str,
     hint: str | None = None,
     feedback_json: str | None = None,
     job_id: str | None = None,
     request_id: str | None = None,
 ) -> str:
     with activity_context(job_id, request_id):
-        context = DocumentContext.from_json(context_json)
         feedback = json.loads(feedback_json) if feedback_json else None
-        draft = await _with_heartbeat(
-            rag_pipeline.generate_card(context, hint, feedback)
-        )
+        draft = await _with_heartbeat(rag_pipeline.generate_card(context, hint, feedback))
         return draft.model_dump_json()
 
 
 @activity.defn
 def verify_citations_activity(
     draft_json: str,
-    context_json: str,
+    context: str,
     job_id: str | None = None,
     request_id: str | None = None,
 ) -> str:
-    """Проверка ссылок: фрагмент существует и был в контексте (SQL + память)."""
     with activity_context(job_id, request_id):
         draft = CardDraft.model_validate_json(draft_json)
-        context = DocumentContext.from_json(context_json)
-        errors = rag_pipeline.verify_citations(draft, context)
+        errors = rag_pipeline.validate_sources(draft, context)
         return json.dumps(errors, ensure_ascii=False)
+
+
+@activity.defn
+def output_guard_activity(
+    draft_json: str, job_id: str | None = None, request_id: str | None = None
+) -> str:
+    with activity_context(job_id, request_id):
+        _cleaned, issues = guard_output(draft_json)
+        return json.dumps(issues, ensure_ascii=False)
 
 
 @activity.defn
 async def critique_card_activity(
     draft_json: str,
-    context_json: str,
+    context: str,
     job_id: str | None = None,
     request_id: str | None = None,
 ) -> str:
     with activity_context(job_id, request_id):
         draft = CardDraft.model_validate_json(draft_json)
-        context = DocumentContext.from_json(context_json)
-        report = await _with_heartbeat(rag_pipeline.critique_card(draft, context))
+        report = await _with_heartbeat(rag_pipeline.critique_card(context, draft))
         return report.model_dump_json()

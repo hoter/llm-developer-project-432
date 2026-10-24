@@ -1,56 +1,55 @@
-"""Разбор выданных документов: pdf постранично, docx с секциями, xlsx строки."""
+"""Разбор выданных документов и нормализация."""
 from pathlib import Path
 
 import pytest
 
-from app.parsers import ScannedDocument
 from app.parsers.docx import parse_docx
-from app.parsers.pdf import parse_pdf
-from app.parsers.xlsx import parse_xlsx
+from app.parsers.normalizer import clean_text, normalize
+from app.parsers.pdf import PdfNoTextLayer, parse_pdf
+from app.services.documents import parse_to_chunks
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
 
-def test_pdf_is_split_by_pages():
-    blocks = parse_pdf(DATA / "blender_passport.pdf")
+def test_pdf_pages_and_tables():
+    blocks = parse_pdf((DATA / "blender_passport.pdf").read_bytes())
+    full = "\n".join(block.content for block in blocks)
 
-    assert [block.page for block in blocks] == [1, 2]
-    assert "BLD-800" in blocks[0].text
-    assert "800 Вт" in blocks[0].text
-    assert "Комплект поставки" in blocks[1].text
-
-
-def test_scanned_pdf_gets_rejection_with_reason():
-    with pytest.raises(ScannedDocument) as error:
-        parse_pdf(DATA / "boiler_scan.pdf")
-
-    assert "текстового слоя" in str(error.value)
+    for probe in ("МиксерПро 800", "BLD-800", "800 Вт", "24 месяца"):
+        assert probe in full
+    tables = [block for block in blocks if block.kind == "table"]
+    assert len(tables) == 2
+    assert len(tables[0].rows) == 13
 
 
-def test_docx_headings_become_sections():
-    blocks = parse_docx(DATA / "blender_kp.docx")
-
-    sections = {block.section for block in blocks}
-    assert "Прайс-лист (опт)" in sections
-    assert any("Смирнова Анна" in block.text for block in blocks)
-
-    table_rows = [block for block in blocks if block.kind == "table"]
-    assert table_rows
-    assert table_rows[0].article == "BLD-500"
-    assert table_rows[0].section == "Прайс-лист (опт)"
-    assert table_rows[0].metadata["headers"][0] == "Артикул"
+def test_scanned_pdf_rejected():
+    with pytest.raises(PdfNoTextLayer):
+        parse_pdf((DATA / "boiler_scan.pdf").read_bytes())
 
 
-def test_xlsx_row_becomes_readable_text():
-    blocks = parse_xlsx(DATA / "kettle_spec.xlsx")
+def test_docx_keeps_contacts_and_prices():
+    blocks = parse_docx((DATA / "blender_kp.docx").read_bytes())
+    full = "\n".join(block.content for block in blocks)
+    assert "+7 926 555-14-08" in full
+    assert "2 190" in full
+    assert len([b for b in blocks if b.kind == "table"]) == 1
 
-    assert len(blocks) == 3
-    first = blocks[0]
-    assert first.article == "KTL-1700"
-    assert first.brand == "КеттлПро"
-    assert first.text.startswith("KTL-1700: ")
-    assert "Мощность, Вт 2200" in first.text
-    assert "Объём, л 1,7" in first.text
-    assert first.section == "Спецификация"
-    assert first.page == 1
-    assert all(block.kind == "table" for block in blocks)
+
+def test_xlsx_rows_become_chunks_with_articul():
+    chunks = parse_to_chunks((DATA / "kettle_spec.xlsx").read_bytes(), "xlsx", "doc1")
+    full = "\n".join(chunk["text"] for chunk in chunks)
+    for articul in ("KTL-1700", "KTL-1000", "KTL-THRM"):
+        assert articul in full
+    assert len([c for c in chunks if c["metadata"].get("articul")]) == 3
+
+
+def test_footer_stripped_from_two_page_pdf():
+    blocks = normalize(parse_pdf((DATA / "blender_passport.pdf").read_bytes()))
+    full = "\n".join(block.content for block in blocks)
+    assert "стр. 1" not in full
+    assert "стр. 2" not in full
+
+
+def test_clean_text_glues_hyphenation():
+    assert clean_text("мощ-\nность") == "мощность"
+    assert clean_text("слева  справа") == "слева справа"

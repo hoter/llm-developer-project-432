@@ -1,35 +1,53 @@
-"""PDF: текст постранично.
+"""PDF: текст постранично и таблицы по геометрии страницы.
 
-Таблицы в pdf — отдельная задача про геометрию страницы, в базовый путь не
-входит. Зато отсутствие текстового слоя — входит: скан без OCR нельзя тихо
-пропустить, у документа должен быть отказ с причиной.
+Отсутствие текстового слоя — отказ с причиной, а не пустой результат.
 """
-from pathlib import Path
+import io
 
-from pypdf import PdfReader
+import pdfplumber
 
-from app.parsers import Block, ParseError, ScannedDocument
+from app.parsers import Block, ParseError
 
 
-def parse_pdf(path: Path) -> list[Block]:
+class PdfNoTextLayer(ParseError):
+    """В PDF нет текстового слоя: скан без OCR."""
+
+
+def parse_pdf(data: bytes) -> list[Block]:
+    blocks: list[Block] = []
     try:
-        reader = PdfReader(str(path))
-    except Exception as exc:  # повреждённый файл
+        pdf = pdfplumber.open(io.BytesIO(data))
+    except Exception as exc:
         raise ParseError(f"не удалось открыть PDF: {exc}") from exc
 
-    blocks: list[Block] = []
-    for number, page in enumerate(reader.pages, start=1):
-        try:
-            text = page.extract_text() or ""
-        except Exception as exc:
-            raise ParseError(f"страница {number}: не удалось извлечь текст: {exc}") from exc
-        text = text.strip()
-        if text:
-            blocks.append(Block(text=text, page=number))
+    with pdf:
+        for number, page in enumerate(pdf.pages, start=1):
+            text = (page.extract_text() or "").strip()
+            if text:
+                blocks.append(Block(content=text, metadata={"page": number}))
+
+            for table in page.extract_tables() or []:
+                rows = [
+                    ["" if cell is None else str(cell).strip() for cell in row]
+                    for row in table
+                    if row is not None
+                ]
+                rows = [row for row in rows if any(row)]
+                if len(rows) < 2:
+                    continue
+                content = "\n".join(" | ".join(row) for row in rows)
+                blocks.append(
+                    Block(
+                        content=content,
+                        kind="table",
+                        rows=rows,
+                        metadata={"page": number},
+                    )
+                )
 
     if not blocks:
-        raise ScannedDocument(
-            "в PDF нет текстового слоя: похоже на скан, а распознавание (OCR) "
+        raise PdfNoTextLayer(
+            "в PDF нет текстового слоя: похоже на скан, распознавание (OCR) "
             "в базовый путь не входит"
         )
     return blocks

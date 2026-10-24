@@ -1,71 +1,65 @@
-"""Фрагменты документов: SQL по таблице chunks.
+"""Фрагменты документов: SQL по chunks и три режима поиска.
 
-Здесь живут все три режима поиска: по векторам, по словам и гибридный.
 Гибрид — Reciprocal Rank Fusion: фрагмент получает вклад 1/(k+rank) от
-каждого списка, где встретился, поэтому найденный обоими оказывается выше.
+каждого списка, где встретился, поэтому найденный обоими идёт выше.
 """
 import json
+import uuid
 
 import psycopg
 
-from app.parsers.chunker import Chunk
+from app.core.config import settings
+from app.rag.embedder import embed_query
 
 RRF_K = 60
 
 _CHUNK_COLUMNS = """
-    c.id, c.document_id, d.filename, c.chunk_index, c.text, c.page,
-    c.section, c.article, c.brand, c.metadata
+    c.id AS chunk_id, c.doc_id, c.text, c.metadata, d.filename
 """
 
 
 def replace_chunks(
-    conn: psycopg.Connection, document_id: str, chunks: list[Chunk]
+    conn: psycopg.Connection, doc_id: str, chunks: list[dict]
 ) -> int:
     """Заменить фрагменты документа целиком — повторный разбор не плодит дубли."""
-    rows = [
-        (
-            document_id,
-            index,
-            chunk.text,
-            chunk.page,
-            chunk.section,
-            chunk.article,
-            chunk.brand,
-            json.dumps(chunk.metadata, ensure_ascii=False),
-        )
-        for index, chunk in enumerate(chunks)
-    ]
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM chunks WHERE document_id = %s", (document_id,))
+            cur.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
+            rows = [
+                (
+                    uuid.uuid4().hex,
+                    doc_id,
+                    index,
+                    chunk["text"],
+                    json.dumps(chunk.get("metadata", {}), ensure_ascii=False),
+                )
+                for index, chunk in enumerate(chunks)
+            ]
             if rows:
                 cur.executemany(
                     """
-                    INSERT INTO chunks
-                        (document_id, chunk_index, text, page, section, article, brand, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO chunks (id, doc_id, ordinal, text, metadata)
+                    VALUES (%s, %s, %s, %s, %s)
                     """,
                     rows,
                 )
-    return len(rows)
+    return len(chunks)
 
 
-def count_chunks(conn: psycopg.Connection, document_id: str) -> int:
+def count_chunks(conn: psycopg.Connection, doc_id: str) -> int:
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT count(*) FROM chunks WHERE document_id = %s", (document_id,)
-        )
+        cur.execute("SELECT count(*) FROM chunks WHERE doc_id = %s", (doc_id,))
         return cur.fetchone()[0]
 
 
-def list_chunks(conn: psycopg.Connection, document_id: str) -> list[dict]:
+def list_chunks(conn: psycopg.Connection, doc_id: str) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT chunk_index, text, page, section, article, brand, metadata
-            FROM chunks WHERE document_id = %s ORDER BY chunk_index
+            SELECT id AS chunk_id, text, metadata
+            FROM chunks WHERE doc_id = %s ORDER BY ordinal
             """,
-            (document_id,),
+            (doc_id,),
         )
         rows = cur.fetchall()
         columns = [column.name for column in cur.description]
@@ -73,25 +67,24 @@ def list_chunks(conn: psycopg.Connection, document_id: str) -> list[dict]:
 
 
 def chunks_without_embedding(
-    conn: psycopg.Connection, *, limit: int = 32, document_id: str | None = None
+    conn: psycopg.Connection, *, limit: int = 32, doc_id: str | None = None
 ) -> list[dict]:
-    query = "SELECT id, text FROM chunks WHERE embedding IS NULL"
+    query = "SELECT id AS chunk_id, text FROM chunks WHERE embedding IS NULL"
     args: list = []
-    if document_id:
-        query += " AND document_id = %s"
-        args.append(document_id)
+    if doc_id:
+        query += " AND doc_id = %s"
+        args.append(doc_id)
     query += " ORDER BY id LIMIT %s"
     args.append(limit)
     with conn.cursor() as cur:
         cur.execute(query, args)
         rows = cur.fetchall()
-    return [{"id": row[0], "text": row[1]} for row in rows]
+    return [{"chunk_id": row[0], "text": row[1]} for row in rows]
 
 
 def set_embeddings(
-    conn: psycopg.Connection, items: list[tuple[list[float], int]]
+    conn: psycopg.Connection, items: list[tuple[list[float], str]]
 ) -> int:
-    """Записать векторы пачкой: [(vector, chunk_id), ...]."""
     with conn.transaction():
         with conn.cursor() as cur:
             cur.executemany(
@@ -101,69 +94,92 @@ def set_embeddings(
     return len(items)
 
 
+def existing_chunk_ids(conn: psycopg.Connection, chunk_ids: list[str]) -> set[str]:
+    if not chunk_ids:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM chunks WHERE id = ANY(%s)", (chunk_ids,))
+        return {row[0] for row in cur.fetchall()}
+
+
+def get_chunks_by_ids(
+    conn: psycopg.Connection, chunk_ids: list[str]
+) -> dict[str, dict]:
+    if not chunk_ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT {_CHUNK_COLUMNS}
+            FROM chunks c JOIN documents d ON d.id = c.doc_id
+            WHERE c.id = ANY(%s)
+            """,
+            (chunk_ids,),
+        )
+        rows = cur.fetchall()
+        columns = [column.name for column in cur.description]
+    return {str(row[0]): dict(zip(columns, row)) for row in rows}
+
+
 def search_vector(
     conn: psycopg.Connection,
-    embedding: list[float],
+    query: str,
     *,
-    limit: int = 5,
-    min_similarity: float = 0.0,
-    **filters,
+    top_k: int = 5,
+    threshold: float | None = None,
+    doc_ids: list[str] | None = None,
 ) -> list[dict]:
-    """Ближайшие к вектору запроса; порог отсекает мусор."""
-    where, filter_args = _filter_clause(filters)
-    vector = _vector_literal(embedding)
-    query = f"""
+    min_similarity = settings.search_min_similarity if threshold is None else threshold
+    vector = _vector_literal(embed_query(query))
+    where, args = _doc_filter(doc_ids)
+    sql = f"""
         SELECT {_CHUNK_COLUMNS}, 1 - (c.embedding <=> %s::vector) AS score
-        FROM chunks c
-        JOIN documents d ON d.id = c.document_id
+        FROM chunks c JOIN documents d ON d.id = c.doc_id
         WHERE c.embedding IS NOT NULL
           AND 1 - (c.embedding <=> %s::vector) >= %s
           {where}
         ORDER BY c.embedding <=> %s::vector
         LIMIT %s
     """
-    args = [vector, vector, min_similarity, *filter_args, vector, limit]
-    return _fetch(conn, query, args)
+    return _fetch(conn, sql, [vector, vector, min_similarity, *args, vector, top_k])
 
 
-def search_text(
-    conn: psycopg.Connection, query_text: str, *, limit: int = 5, **filters
+def search_fts(
+    conn: psycopg.Connection,
+    query: str,
+    *,
+    top_k: int = 5,
+    doc_ids: list[str] | None = None,
 ) -> list[dict]:
-    """Обычное ранжирование полнотекстового поиска (russian)."""
-    where, filter_args = _filter_clause(filters)
-    query = f"""
+    where, args = _doc_filter(doc_ids)
+    sql = f"""
         SELECT {_CHUNK_COLUMNS},
                ts_rank_cd(c.tsv, plainto_tsquery('russian', %s)) AS score
-        FROM chunks c
-        JOIN documents d ON d.id = c.document_id
+        FROM chunks c JOIN documents d ON d.id = c.doc_id
         WHERE c.tsv @@ plainto_tsquery('russian', %s)
           {where}
         ORDER BY score DESC, c.id
         LIMIT %s
     """
-    args = [query_text, query_text, *filter_args, limit]
-    return _fetch(conn, query, args)
+    return _fetch(conn, sql, [query, query, *args, top_k])
 
 
 def search_hybrid(
     conn: psycopg.Connection,
-    embedding: list[float],
-    query_text: str,
+    query: str,
     *,
-    limit: int = 5,
-    min_similarity: float = 0.0,
-    candidate_limit: int | None = None,
-    **filters,
+    top_k: int = 5,
+    threshold: float | None = None,
+    doc_ids: list[str] | None = None,
 ) -> list[dict]:
-    """Векторы + слова, слияние по обратным позициям (RRF)."""
-    candidates = candidate_limit or max(limit * 4, 20)
-    where, filter_args = _filter_clause(filters)
-    vector = _vector_literal(embedding)
+    min_similarity = settings.search_min_similarity if threshold is None else threshold
+    candidates = max(top_k * 4, 20)
+    vector = _vector_literal(embed_query(query))
+    where, args = _doc_filter(doc_ids)
 
-    query = f"""
+    sql = f"""
         WITH vector_candidates AS (
-            SELECT c.id,
-                   row_number() OVER (ORDER BY c.embedding <=> %s::vector) AS rank
+            SELECT c.id, row_number() OVER (ORDER BY c.embedding <=> %s::vector) AS rank
             FROM chunks c
             WHERE c.embedding IS NOT NULL
               AND 1 - (c.embedding <=> %s::vector) >= %s
@@ -194,80 +210,30 @@ def search_hybrid(
         SELECT {_CHUNK_COLUMNS}, f.score
         FROM fused f
         JOIN chunks c ON c.id = f.id
-        JOIN documents d ON d.id = c.document_id
+        JOIN documents d ON d.id = c.doc_id
         ORDER BY f.score DESC, c.id
         LIMIT %s
     """
-    args = [
-        vector,
-        vector,
-        min_similarity,
-        *filter_args,
-        vector,
-        candidates,
-        query_text,
-        query_text,
-        *filter_args,
-        query_text,
-        candidates,
-        limit,
+    params = [
+        vector, vector, min_similarity, *args, vector, candidates,
+        query, query, *args, query, candidates, top_k,
     ]
-    return _fetch(conn, query, args)
+    return _fetch(conn, sql, params)
 
 
-def _filter_clause(filters: dict) -> tuple[str, list]:
-    clauses = []
-    args: list = []
-    for column in ("document_id", "section", "article", "brand"):
-        value = filters.get(column)
-        if value:
-            clauses.append(f"c.{column} = %s")
-            args.append(value)
-    document_ids = filters.get("document_ids")
-    if document_ids:
-        clauses.append("c.document_id = ANY(%s)")
-        args.append(document_ids)
-    if not clauses:
-        return "", args
-    return "AND " + " AND ".join(clauses), args
+def _doc_filter(doc_ids: list[str] | None) -> tuple[str, list]:
+    if not doc_ids:
+        return "", []
+    return "AND c.doc_id = ANY(%s)", [doc_ids]
 
 
 def _vector_literal(vector: list[float]) -> str:
     return "[" + ",".join(f"{float(value):.7f}" for value in vector) + "]"
 
 
-def _fetch(conn: psycopg.Connection, query: str, args: list) -> list[dict]:
+def _fetch(conn: psycopg.Connection, sql: str, args: list) -> list[dict]:
     with conn.cursor() as cur:
-        cur.execute(query, args)
+        cur.execute(sql, args)
         rows = cur.fetchall()
         columns = [column.name for column in cur.description]
     return [dict(zip(columns, row)) for row in rows]
-
-
-def existing_chunk_ids(conn: psycopg.Connection, chunk_ids: list[int]) -> set[int]:
-    if not chunk_ids:
-        return set()
-    with conn.cursor() as cur:
-        cur.execute("SELECT id FROM chunks WHERE id = ANY(%s)", (chunk_ids,))
-        return {row[0] for row in cur.fetchall()}
-
-
-def get_chunks_by_ids(
-    conn: psycopg.Connection, chunk_ids: list[int]
-) -> dict[str, dict]:
-    """Фрагменты по id: нужны, чтобы дописать источники к готовой карточке."""
-    if not chunk_ids:
-        return {}
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT {_CHUNK_COLUMNS}
-            FROM chunks c
-            JOIN documents d ON d.id = c.document_id
-            WHERE c.id = ANY(%s)
-            """,
-            (chunk_ids,),
-        )
-        rows = cur.fetchall()
-        columns = [column.name for column in cur.description]
-    return {str(row[0]): dict(zip(columns, row)) for row in rows}

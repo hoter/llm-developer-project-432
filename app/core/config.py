@@ -40,8 +40,8 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 10 * 1024 * 1024
 
     # Эмбеддинги и поиск
-    embedding_model: str = "intfloat/multilingual-e5-large"
-    embedding_dimension: int = 1024
+    embedding_model: str = "google/embeddinggemma-300m"
+    embed_dim: int = 768
     embedding_batch_size: int = 32
     # Порог косинусной близости откалиброван на выданных документах
     # (см. docs/decisions.md, ADR-005)
@@ -51,8 +51,8 @@ class Settings(BaseSettings):
     rag_search_limit: int = 8
     rag_context_max_chars: int = 6000
 
-    # Защита: сколько подозрительных фрагментов терпим до блокировки документа
-    injection_max_suspicious: int = 2
+    # Защита: больше этого числа подозрительных фрагментов — документ человеку
+    suspicious_chunk_limit: int = 2
 
 
 settings = Settings()

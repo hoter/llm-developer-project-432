@@ -248,8 +248,9 @@ class RagCardWorkflow:
                 retry_policy=STEP_RETRY,
             )
             guarded = json.loads(guarded_json)
-            context_json = json.dumps(guarded["context"], ensure_ascii=False)
-            report_json = json.dumps(guarded["report"], ensure_ascii=False)
+            context = guarded["context"]
+            report = guarded["report"]
+            report_json = json.dumps(report, ensure_ascii=False)
 
             await workflow.execute_activity(
                 set_guard_report_activity,
@@ -258,14 +259,17 @@ class RagCardWorkflow:
                 retry_policy=STATUS_RETRY,
             )
 
-            if guarded["report"]["blocked"]:
+            if report.get("needs_review") or not context:
                 # Слишком много подозрительных фрагментов: не генерируем,
                 # документ уходит человеку с причиной.
+                reason = (
+                    "все найденные фрагменты исключены защитой"
+                    if not context
+                    else "слишком много подозрительных фрагментов: "
+                    + ", ".join(report.get("suspicious_chunks", []))
+                )
                 await self._set_status(
-                    job_id,
-                    "needs_review",
-                    error=guarded["report"]["reason"],
-                    request_id=request_id,
+                    job_id, "needs_review", error=reason, request_id=request_id
                 )
                 return ""
 
@@ -279,7 +283,7 @@ class RagCardWorkflow:
                 draft_json = await workflow.execute_activity(
                     generate_card_activity,
                     args=[
-                        context_json,
+                        context,
                         hint,
                         json.dumps(feedback, ensure_ascii=False) if feedback else None,
                         job_id,
@@ -294,7 +298,7 @@ class RagCardWorkflow:
                 errors = json.loads(
                     await workflow.execute_activity(
                         verify_citations_activity,
-                        args=[draft_json, context_json, job_id, request_id],
+                        args=[draft_json, context, job_id, request_id],
                         start_to_close_timeout=STATUS_TIMEOUT,
                         retry_policy=STATUS_RETRY,
                     )
@@ -318,7 +322,7 @@ class RagCardWorkflow:
                 report = json.loads(
                     await workflow.execute_activity(
                         critique_card_activity,
-                        args=[draft_json, context_json, job_id, request_id],
+                        args=[draft_json, context, job_id, request_id],
                         start_to_close_timeout=ACTIVITY_TIMEOUT,
                         heartbeat_timeout=HEARTBEAT_TIMEOUT,
                         retry_policy=STEP_RETRY,

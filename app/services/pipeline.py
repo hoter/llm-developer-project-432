@@ -1,27 +1,23 @@
 """Стадии пайплайна: extract → generate → critique.
 
-Каждая функция — один агент-шаг. Один и тот же код работает в двух runtime:
-- синхронный эндпоинт POST /cards (весь пайплайн в запросе),
-- Temporal activities в фоновом процессе.
-Это и есть выигрыш слоистой архитектуры.
-
-Пайплайн не знает про базу и статусы: состояние задачи пишет отдельный шаг
-процесса (app/temporal/activities.py). Зато он знает про контракт: ответ
-модели проходит через app/services/structured.py — разбор, валидацию и
-лечение, а не «повезёт/не повезёт».
+Тот же код работает в синхронном обработчике и в Temporal-activities.
+Генерация идёт через structured.validate_or_retry: ответ модели проверяется
+по контракту, ошибка возвращается модели, попытки ограничены.
 """
-from app.agents.prompts import critic_agent, extractor_agent, generator_agent
-from app.core.config import settings
+from app.agents.prompts import critic_agent, extractor_agent
 from app.core.logging import get_logger
+from app.llm.client import run_agent
 from app.schemas import CardDraft, CritiqueReport, SupplierFacts
-from app.services.structured import call_structured
+from app.services import structured
+from app.services.json_utils import parse_llm_json
 
 log = get_logger(__name__)
 
 
 async def extract(supplier_text: str) -> SupplierFacts:
     log.info("step_extract_start")
-    return await call_structured(extractor_agent, supplier_text, SupplierFacts)
+    raw = await run_agent(extractor_agent, supplier_text)
+    return SupplierFacts.model_validate(parse_llm_json(raw))
 
 
 async def generate(facts: SupplierFacts, feedback: list[str] | None = None) -> CardDraft:
@@ -29,7 +25,7 @@ async def generate(facts: SupplierFacts, feedback: list[str] | None = None) -> C
     if feedback:
         prompt += "\n\nЗамечания критика, учти:\n" + "\n".join(f"- {i}" for i in feedback)
     log.info("step_generate_start", feedback=bool(feedback))
-    return await call_structured(generator_agent, prompt, CardDraft)
+    return await structured.validate_or_retry(prompt)
 
 
 async def critique(facts: SupplierFacts, draft: CardDraft) -> CritiqueReport:
@@ -40,39 +36,28 @@ async def critique(facts: SupplierFacts, draft: CardDraft) -> CritiqueReport:
         + draft.model_dump_json(indent=2)
     )
     log.info("step_critique_start")
-    # Проверка черновика — служебный вызов: дешёвая модель
-    return await call_structured(critic_agent, prompt, CritiqueReport, aux=True)
+    raw = await run_agent(critic_agent, prompt)
+    return CritiqueReport.model_validate(parse_llm_json(raw))
 
 
 async def run_pipeline(supplier_text: str, max_attempts: int = 3):
-    """Полный цикл: extract → (generate → critique → feedback)* → итог.
-
-    Возвращает (итоговый черновик, число генераций, вердикт).
-
-    Вердикт ``needs_review`` — критик доволен, но уверенность модели ниже
-    порога: такая карточка не «готова», её обязан посмотреть человек.
-    """
+    """Полный цикл. Возвращает (черновик, попытки, вердикт, статус)."""
     facts = await extract(supplier_text)
     feedback: list[str] = []
     attempts = 0
     draft = None
     verdict = "rejected"
+    status = "rejected"
+
     while attempts < max_attempts:
         attempts += 1
         draft = await generate(facts, feedback or None)
         report = await critique(facts, draft)
         if report.verdict == "approve":
-            if draft.confidence < settings.confidence_threshold:
-                verdict = "needs_review"
-                log.info(
-                    "pipeline_low_confidence",
-                    confidence=draft.confidence,
-                    threshold=settings.confidence_threshold,
-                    missing=len(draft.missing_fields),
-                )
-            else:
-                verdict = "approved"
+            status = structured.confidence_gate(draft)
+            verdict = "approved" if status == "done" else "needs_review"
             break
         feedback = report.issues
         log.info("pipeline_regenerate", attempt=attempts, issues=report.issues)
-    return draft, attempts, verdict
+
+    return draft, attempts, verdict, status

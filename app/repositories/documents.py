@@ -13,40 +13,36 @@ def create_document(
     *,
     document_id: str,
     filename: str,
-    content_type: str | None,
-    extension: str,
-    size_bytes: int,
-    sha256: str,
-    stored_path: str,
+    content_hash: str,
+    kind: str,
+    size_bytes: int | None = None,
+    content_type: str | None = None,
+    stored_path: str | None = None,
 ) -> tuple[str, bool]:
-    """Создать документ. Возвращает (id, создан_ли).
-
-    Уникальный sha256 делает повторную загрузку того же файла идемпотентной:
-    вторая вставка ничего не делает, и мы возвращаем существующий id.
-    """
+    """Создать документ; повторный content_hash возвращает существующий id."""
     with conn.cursor() as cur:
         row = cur.execute(
             """
             INSERT INTO documents
-                (id, filename, content_type, extension, size_bytes, sha256, stored_path)
+                (id, filename, content_hash, kind, size_bytes, content_type, stored_path)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (sha256) DO NOTHING
+            ON CONFLICT (content_hash) DO NOTHING
             RETURNING id
             """,
             (
                 document_id,
                 filename,
-                content_type,
-                extension,
+                content_hash,
+                kind,
                 size_bytes,
-                sha256,
+                content_type,
                 stored_path,
             ),
         ).fetchone()
         if row:
             return row[0], True
         row = cur.execute(
-            "SELECT id FROM documents WHERE sha256 = %s", (sha256,)
+            "SELECT id FROM documents WHERE content_hash = %s", (content_hash,)
         ).fetchone()
         return row[0], False
 
@@ -55,8 +51,8 @@ def get_document(conn: psycopg.Connection, document_id: str) -> dict | None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, filename, content_type, extension, size_bytes, sha256,
-                   stored_path, status, error, chunks_count
+            SELECT id, filename, content_hash, kind, status, size_bytes,
+                   content_type, stored_path, error, chunks_count
             FROM documents WHERE id = %s
             """,
             (document_id,),
@@ -68,9 +64,9 @@ def get_document(conn: psycopg.Connection, document_id: str) -> dict | None:
     return dict(zip(columns, row))
 
 
-def get_by_sha(conn: psycopg.Connection, sha256: str) -> dict | None:
+def get_by_hash(conn: psycopg.Connection, content_hash: str) -> dict | None:
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM documents WHERE sha256 = %s", (sha256,))
+        cur.execute("SELECT id FROM documents WHERE content_hash = %s", (content_hash,))
         row = cur.fetchone()
     return {"id": row[0]} if row else None
 
@@ -97,13 +93,12 @@ def set_status(
 
 
 def get_documents(conn: psycopg.Connection, document_ids: list[str]) -> list[dict]:
-    """Документы по списку id — для проверки выбора и подписи контекста."""
     if not document_ids:
         return []
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, filename, status, chunks_count
+            SELECT id, filename, kind, status, chunks_count
             FROM documents WHERE id = ANY(%s) ORDER BY filename
             """,
             (document_ids,),
@@ -114,10 +109,8 @@ def get_documents(conn: psycopg.Connection, document_ids: list[str]) -> list[dic
 
 
 def get_documents_meta(conn: psycopg.Connection) -> list[dict]:
-    """Все документы (id, имя, статус) — для разрешения эталонных имён."""
     with conn.cursor() as cur:
         cur.execute("SELECT id, filename, status FROM documents ORDER BY filename")
         rows = cur.fetchall()
         columns = [column.name for column in cur.description]
     return [dict(zip(columns, row)) for row in rows]
-

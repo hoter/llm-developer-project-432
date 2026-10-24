@@ -14,8 +14,9 @@ from pathlib import Path
 
 from app.core import db
 from app.core.logging import setup_logging
+from app.repositories import chunks as chunks_repo
 from app.repositories import documents as documents_repo
-from app.services.rag_pipeline import GuardrailsBlocked, NoContextError, run_pipeline
+from app.services.rag_pipeline import SourceValidationError, run_rag_pipeline
 from evals.judge import judge_card
 from evals.metrics import characteristic_match, citation_support
 
@@ -45,19 +46,25 @@ async def evaluate(use_all: bool) -> dict:
             continue
 
         try:
-            result = await run_pipeline([document["id"]], hint=expected.get("product"))
-        except (GuardrailsBlocked, NoContextError) as exc:
+            draft, attempts, verdict_name, status, guard = await run_rag_pipeline(
+                expected.get("product"), [document["id"]]
+            )
+        except SourceValidationError as exc:
             rows.append({"document": filename, "skipped": f"защита: {exc}"})
             print(f"  {filename:24} пропущен: {exc}")
             continue
 
+        cited = [source.chunk_id for source in draft.sources]
+        with db.connection() as conn:
+            cited_chunks = chunks_repo.get_chunks_by_ids(conn, cited)
+
         characteristics = characteristic_match(
-            expected.get("characteristics", {}), result.draft.characteristics
+            expected.get("characteristics", {}), draft.characteristics
         )
         citations = citation_support(
-            result.draft, result.context, expected.get("source_probes", {})
+            draft, expected.get("source_probes", {}), cited_chunks
         )
-        verdict = await judge_card(result.draft, result.context)
+        verdict = await judge_card(draft, draft.model_dump_json())
 
         rows.append(
             {
@@ -68,10 +75,15 @@ async def evaluate(use_all: bool) -> dict:
                 "citation_failed": citations["failed"],
                 "judge_supported": verdict.supported,
                 "judge_unsupported_claims": verdict.unsupported_claims,
-                "attempts": result.attempts,
-                "verdict": result.verdict,
-                "confidence": result.draft.confidence,
-                "missing_fields": result.draft.missing_fields,
+                "attempts": attempts,
+                "verdict": verdict_name,
+                "status": status,
+                "confidence": draft.confidence,
+                "missing_fields": draft.missing_fields,
+                "guard": {
+                    "masked_pii": guard.masked_pii,
+                    "suspicious_chunks": guard.suspicious_chunks,
+                },
             }
         )
         print(

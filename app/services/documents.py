@@ -1,16 +1,14 @@
-"""Сервис документа: разбор → нормализация → резка → сохранение.
-
-Соединение берём на операцию: разбор файла и вызовы модели не должны
-держать коннект из пула. Состояние документа переключается по ходу дела,
-а неудачный разбор — это статус failed с причиной, не тихий пустой результат.
-"""
+"""Сервис документа: разбор → нормализация → резка → сохранение."""
 from pathlib import Path
 
 from app.core import db
 from app.core.logging import get_logger
-from app.parsers import ParseError, parse_document
+from app.parsers import ParseError, UnsupportedFormat
 from app.parsers.chunker import chunk_blocks
-from app.parsers.normalizer import normalize_blocks
+from app.parsers.docx import parse_docx
+from app.parsers.normalizer import normalize
+from app.parsers.pdf import parse_pdf
+from app.parsers.xlsx import parse_xlsx
 from app.rag.reindex import index_document
 from app.repositories import chunks as chunks_repo
 from app.repositories import documents as documents_repo
@@ -18,11 +16,22 @@ from app.repositories import documents as documents_repo
 log = get_logger(__name__)
 
 
-def ingest_document(document_id: str) -> str:
-    """Разобрать документ и сохранить фрагменты. Возвращает новый статус.
+def parse_to_chunks(data: bytes, kind: str, doc_id: str) -> list[dict]:
+    """Разобрать файл и нарезать на фрагменты с метаданными."""
+    kind = kind.lower().lstrip(".")
+    if kind == "pdf":
+        blocks = parse_pdf(data)
+    elif kind == "docx":
+        blocks = parse_docx(data)
+    elif kind == "xlsx":
+        blocks = parse_xlsx(data)
+    else:
+        raise UnsupportedFormat(f"формат «{kind or 'без расширения'}» не поддерживается")
+    return chunk_blocks(normalize(blocks), doc_id)
 
-    Синхронная функция: её запускает Temporal-activity в пуле потоков.
-    """
+
+def ingest_document(document_id: str) -> str:
+    """Разобрать документ и сохранить фрагменты. Возвращает новый статус."""
     with db.connection() as conn:
         document = documents_repo.get_document(conn, document_id)
     if not document:
@@ -31,9 +40,8 @@ def ingest_document(document_id: str) -> str:
     _set_status(document_id, "parsing")
 
     try:
-        blocks = parse_document(Path(document["stored_path"]))
-        blocks = normalize_blocks(blocks, document_name=document["filename"])
-        chunks = chunk_blocks(blocks, document=document["filename"])
+        data = Path(document["stored_path"]).read_bytes()
+        chunks = parse_to_chunks(data, document["kind"], document_id)
         if not chunks:
             raise ParseError("документ не дал ни одного фрагмента")
     except Exception as exc:
@@ -41,12 +49,9 @@ def ingest_document(document_id: str) -> str:
         _set_status(document_id, "failed", error=str(exc))
         return "failed"
 
-    # Сохранение — вне try: сбой базы должен дойти до движка и повториться,
-    # а не превратиться в «документ плохой».
     with db.connection() as conn:
         chunks_repo.replace_chunks(conn, document_id, chunks)
 
-    # Продолжение цепочки: векторы считаются сразу после фрагментов.
     vectors = index_document(document_id)
 
     with db.connection() as conn:
@@ -54,10 +59,7 @@ def ingest_document(document_id: str) -> str:
             conn, document_id, "indexed", chunks_count=len(chunks)
         )
     log.info(
-        "document_indexed",
-        document_id=document_id,
-        chunks=len(chunks),
-        vectors=vectors,
+        "document_indexed", document_id=document_id, chunks=len(chunks), vectors=vectors
     )
     return "indexed"
 

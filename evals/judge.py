@@ -1,17 +1,12 @@
-"""Модель в роли судьи: подтверждены ли утверждения карточки источниками.
-
-Приём спорный: судья — та же модель, что и генератор, и его число — оценка,
-а не истина. Тренд по нему виден, абсолютной верой его принимать нельзя.
-"""
+"""Модель в роли судьи: подтверждены ли утверждения карточки источниками."""
 from app.agents.prompts import judge_agent
-from app.rag.context import DocumentContext
 from app.schemas import CardDraft, JudgeVerdict
 from app.services.structured import call_structured
 
 
-def build_judge_prompt(card: CardDraft, context: DocumentContext) -> str:
+def build_judge_prompt(card: CardDraft, context: str) -> str:
     return (
-        context.text
+        context
         + "\n\nКарточка для проверки:\n"
         + card.model_dump_json(indent=2)
         + "\n\nПроверь каждое утверждение карточки по фрагменту, на который оно "
@@ -20,12 +15,7 @@ def build_judge_prompt(card: CardDraft, context: DocumentContext) -> str:
     )
 
 
-async def judge_card(card: CardDraft, context: DocumentContext) -> JudgeVerdict:
-    """Спросить модель-судью. Служебный вызов — на дешёвой модели."""
-    verdict = await call_structured(
-        judge_agent,
-        build_judge_prompt(card, context),
-        JudgeVerdict,
-        aux=True,
+async def judge_card(card: CardDraft, context: str) -> JudgeVerdict:
+    return await call_structured(
+        judge_agent, build_judge_prompt(card, context), JudgeVerdict, aux=True
     )
-    return verdict
