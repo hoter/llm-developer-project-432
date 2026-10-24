@@ -23,6 +23,7 @@ from app.schemas import (
 )
 
 _MODEL = settings.llm_model
+_AUX_MODEL = settings.llm_aux_model
 
 # Reasoning-модели (gemma-4 и т.п.) тратят токены на «размышления» до ответа:
 # без запаса max_tokens бюджет кончается раньше content, и LM Studio
@@ -86,7 +87,7 @@ critic_agent = Agent(
         "Никакого markdown, только валидный JSON.\n\n"
         "Схема ответа:\n" + _schema_text(CritiqueReport)
     ),
-    model=_MODEL,
+    model=_AUX_MODEL,
     model_settings=_MODEL_SETTINGS,
 )
 
@@ -133,7 +134,7 @@ rag_critic_agent = Agent(
         "В issues — конкретное расхождение и поле карточки.\n\n"
         "Схема ответа:\n" + _schema_text(CritiqueReport)
     ),
-    model=_MODEL,
+    model=_AUX_MODEL,
     model_settings=_MODEL_SETTINGS,
 )
 
@@ -152,7 +153,7 @@ judge_agent = Agent(
         "Верни СТРОГО JSON по схеме.\n\n"
         "Схема ответа:\n" + _schema_text(JudgeVerdict)
     ),
-    model=_MODEL,
+    model=_AUX_MODEL,
     model_settings=_MODEL_SETTINGS,
 )
 
@@ -172,6 +173,6 @@ injection_detector_agent = Agent(
         "Верни СТРОГО JSON по схеме.\n\n"
         "Схема ответа:\n" + _schema_text(InjectionVerdict)
     ),
-    model=_MODEL,
+    model=_AUX_MODEL,
     model_settings=_MODEL_SETTINGS,
 )

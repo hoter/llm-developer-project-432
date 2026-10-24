@@ -26,11 +26,15 @@ def conn(monkeypatch):
     except psycopg.OperationalError as exc:
         pytest.skip(f"PostgreSQL недоступен: {exc}")
     monkeypatch.setattr("app.services.documents.index_document", lambda document_id: 0)
-    yield connection
+    created: list[str] = []
+    yield connection, created
+    if created:
+        with connection.cursor() as cur:
+            cur.execute("DELETE FROM documents WHERE id = ANY(%s)", (created,))
     connection.close()
 
 
-def _document(conn, tmp_path: Path, filename: str) -> tuple[str, Path]:
+def _document(conn, created: list[str], tmp_path: Path, filename: str) -> tuple[str, Path]:
     target = tmp_path / filename
     shutil.copyfile(DATA / filename, target)
     doc_id = uuid.uuid4().hex[:12]
@@ -43,18 +47,20 @@ def _document(conn, tmp_path: Path, filename: str) -> tuple[str, Path]:
         size_bytes=target.stat().st_size,
         stored_path=str(target),
     )
+    created.append(doc_id)
     return doc_id, target
 
 
 def test_xlsx_indexed_with_articul(conn, tmp_path):
-    doc_id, _ = _document(conn, tmp_path, "kettle_spec.xlsx")
+    connection, created = conn
+    doc_id, _ = _document(connection, created, tmp_path, "kettle_spec.xlsx")
 
     assert ingest_document(doc_id) == "indexed"
 
-    stored = documents_repo.get_document(conn, doc_id)
+    stored = documents_repo.get_document(connection, doc_id)
     assert stored["status"] == "indexed"
     assert stored["chunks_count"] == 3
-    chunks = chunks_repo.list_chunks(conn, doc_id)
+    chunks = chunks_repo.list_chunks(connection, doc_id)
     assert [chunk["metadata"].get("articul") for chunk in chunks] == [
         "KTL-1700",
         "KTL-1000",
@@ -63,10 +69,11 @@ def test_xlsx_indexed_with_articul(conn, tmp_path):
 
 
 def test_scanned_pdf_failed_with_reason(conn, tmp_path):
-    doc_id, _ = _document(conn, tmp_path, "boiler_scan.pdf")
+    connection, created = conn
+    doc_id, _ = _document(connection, created, tmp_path, "boiler_scan.pdf")
 
     assert ingest_document(doc_id) == "failed"
 
-    stored = documents_repo.get_document(conn, doc_id)
+    stored = documents_repo.get_document(connection, doc_id)
     assert "текстового слоя" in stored["error"]
-    assert chunks_repo.count_chunks(conn, doc_id) == 0
+    assert chunks_repo.count_chunks(connection, doc_id) == 0

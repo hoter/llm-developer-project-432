@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 32
     # Порог косинусной близости откалиброван на выданных документах
     # (см. docs/decisions.md, ADR-005)
-    search_min_similarity: float = 0.826
+    search_min_similarity: float = 0.46
     search_limit: int = 5
     # Сколько фрагментов брать в контекст и сколько символов он может занять
     rag_search_limit: int = 8

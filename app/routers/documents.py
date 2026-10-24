@@ -46,7 +46,7 @@ async def upload_document(file: UploadFile = File(...)):
     digest = hashlib.sha256(data).hexdigest()
 
     with db.connection() as conn:
-        existing = documents_repo.get_by_sha(conn, digest)
+        existing = documents_repo.get_by_hash(conn, digest)
         if existing:
             document = documents_repo.get_document(conn, existing["id"])
             return JSONResponse(

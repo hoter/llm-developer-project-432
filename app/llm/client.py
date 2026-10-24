@@ -74,7 +74,12 @@ async def run_agent(agent: Agent, prompt: str, *, role: str | None = None, aux: 
     их привязывает обработчик и воркер.
     """
     setup_llm()
-    model = settings.llm_aux_model if aux else settings.llm_model
+    if aux:
+        model = settings.llm_aux_model
+    elif getattr(agent, "model", None):
+        model = agent.model
+    else:
+        model = settings.llm_model
     if getattr(agent, "model", None) is not None and agent.model != model and hasattr(agent, "clone"):
         agent = agent.clone(model=model)
 
