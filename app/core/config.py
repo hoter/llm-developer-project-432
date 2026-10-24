@@ -51,5 +51,8 @@ class Settings(BaseSettings):
     rag_search_limit: int = 8
     rag_context_max_chars: int = 6000
 
+    # Защита: сколько подозрительных фрагментов терпим до блокировки документа
+    injection_max_suspicious: int = 2
+
 
 settings = Settings()

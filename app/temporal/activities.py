@@ -110,7 +110,11 @@ def set_status_activity(
     операцию и сразу возвращаем в пул.
     """
     with activity_context(job_id, request_id):
-        result = CardDraft.model_validate_json(result_json) if result_json else None
+        result = (
+            rag_pipeline.sanitize_card(CardDraft.model_validate_json(result_json))
+            if result_json
+            else None
+        )
         with db.connection() as conn:
             jobs_repo.set_status(
                 conn,
@@ -135,15 +139,38 @@ def parse_document_activity(document_id: str, request_id: str | None = None) -> 
 
 
 @activity.defn
-def retrieve_context_activity(
+async def retrieve_context_activity(
     document_ids: list[str],
     hint: str | None = None,
     job_id: str | None = None,
     request_id: str | None = None,
 ) -> str:
-    """Поиск и сборка контекста: embeddings + SQL, синхронно в пуле потоков."""
+    """Поиск, проверка на инъекции и сборка контекста с маскированием PII."""
     with activity_context(job_id, request_id):
-        return rag_pipeline.retrieve_context(document_ids, hint).to_json()
+        guarded = await _with_heartbeat(
+            rag_pipeline.retrieve_and_guard(document_ids, hint)
+        )
+        return guarded.to_json()
+
+
+@activity.defn
+def set_guard_report_activity(
+    job_id: str, report_json: str, request_id: str | None = None
+) -> None:
+    """Отчёт защиты по задаче: что замаскировано и что исключено."""
+    with activity_context(job_id, request_id):
+        with db.connection() as conn:
+            jobs_repo.set_guard_report(conn, job_id, json.loads(report_json))
+
+
+@activity.defn
+def output_guard_activity(
+    draft_json: str, job_id: str | None = None, request_id: str | None = None
+) -> str:
+    """Фильтр выхода: PII и следы служебных инструкций в готовой карточке."""
+    with activity_context(job_id, request_id):
+        draft = CardDraft.model_validate_json(draft_json)
+        return json.dumps(rag_pipeline.check_output(draft), ensure_ascii=False)
 
 
 @activity.defn

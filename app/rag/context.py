@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 
 from app.core.config import settings
+from app.guardrails import pii
 
 
 @dataclass
@@ -26,6 +27,7 @@ class ContextSource:
 class DocumentContext:
     text: str
     sources: list[ContextSource] = field(default_factory=list)
+    masked: dict[str, int] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(
@@ -42,6 +44,7 @@ class DocumentContext:
                     }
                     for source in self.sources
                 ],
+                "masked": self.masked,
             },
             ensure_ascii=False,
         )
@@ -52,6 +55,7 @@ class DocumentContext:
         return cls(
             text=data["text"],
             sources=[ContextSource(**source) for source in data["sources"]],
+            masked=data.get("masked", {}),
         )
 
     def chunk_ids(self) -> set[str]:
@@ -67,11 +71,17 @@ def build_context(
     blocks: list[str] = []
     sources: list[ContextSource] = []
     total = 0
+    masked_total: dict[str, int] = {}
 
     for chunk in chunks:
-        text = (chunk.get("text") or "").strip()
-        if not text:
+        raw_text = (chunk.get("text") or "").strip()
+        if not raw_text:
             continue
+        # Маскирование — часть сборки контекста: до промпта и до логов.
+        masked = pii.mask(raw_text)
+        text = masked.text
+        for kind, count in masked.counts.items():
+            masked_total[kind] = masked_total.get(kind, 0) + count
         key = " ".join(text.split())
         if key in seen:
             continue
@@ -98,7 +108,9 @@ def build_context(
         )
         total += len(block) + 2
 
-    return DocumentContext(text="\n\n".join(blocks), sources=sources)
+    return DocumentContext(
+        text="\n\n".join(blocks), sources=sources, masked=masked_total
+    )
 
 
 def _format_block(source_id: str, chunk: dict, text: str) -> str:

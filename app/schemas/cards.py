@@ -129,3 +129,10 @@ class JudgeVerdict(BaseModel):
         default_factory=list, description="Утверждения без подтверждения"
     )
 
+
+class InjectionVerdict(BaseModel):
+    """Вердикт точного детектора инъекций."""
+
+    suspicious: bool = Field(description="Фрагмент пытается управлять моделью")
+    reason: str = Field(default="", description="Почему фрагмент подозрителен")
+

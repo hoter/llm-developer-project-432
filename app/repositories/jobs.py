@@ -69,7 +69,7 @@ def set_status(
 def get_job(conn: psycopg.Connection, job_id: str) -> dict | None:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, status, attempts, result, error FROM jobs WHERE id = %s",
+            "SELECT id, status, attempts, result, error, guard_report FROM jobs WHERE id = %s",
             (job_id,),
         )
         row = cur.fetchone()
@@ -81,6 +81,7 @@ def get_job(conn: psycopg.Connection, job_id: str) -> dict | None:
         "attempts": row[2],
         "result": None,
         "error": row[4],
+        "guard_report": row[5],
     }
     if row[3]:
         # psycopg3 возвращает JSONB уже как dict, а не строку
@@ -94,3 +95,13 @@ def get_job(conn: psycopg.Connection, job_id: str) -> dict | None:
         except Exception:
             job["result"] = None
     return job
+
+
+def set_guard_report(
+    conn: psycopg.Connection, job_id: str, report: dict
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE jobs SET guard_report = %s, updated_at = %s WHERE id = %s",
+            (json.dumps(report, ensure_ascii=False), _now(), job_id),
+        )

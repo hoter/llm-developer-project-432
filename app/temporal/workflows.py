@@ -28,8 +28,10 @@ with workflow.unsafe.imports_passed_through():
         extract_activity,
         generate_activity,
         generate_card_activity,
+        output_guard_activity,
         parse_document_activity,
         retrieve_context_activity,
+        set_guard_report_activity,
         set_status_activity,
         verify_citations_activity,
     )
@@ -238,13 +240,34 @@ class RagCardWorkflow:
     ) -> str:
         try:
             await self._set_status(job_id, "retrieving", request_id=request_id)
-            context_json = await workflow.execute_activity(
+            guarded_json = await workflow.execute_activity(
                 retrieve_context_activity,
                 args=[document_ids, hint, job_id, request_id],
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 heartbeat_timeout=HEARTBEAT_TIMEOUT,
                 retry_policy=STEP_RETRY,
             )
+            guarded = json.loads(guarded_json)
+            context_json = json.dumps(guarded["context"], ensure_ascii=False)
+            report_json = json.dumps(guarded["report"], ensure_ascii=False)
+
+            await workflow.execute_activity(
+                set_guard_report_activity,
+                args=[job_id, report_json, request_id],
+                start_to_close_timeout=STATUS_TIMEOUT,
+                retry_policy=STATUS_RETRY,
+            )
+
+            if guarded["report"]["blocked"]:
+                # Слишком много подозрительных фрагментов: не генерируем,
+                # документ уходит человеку с причиной.
+                await self._set_status(
+                    job_id,
+                    "needs_review",
+                    error=guarded["report"]["reason"],
+                    request_id=request_id,
+                )
+                return ""
 
             feedback: list[str] = []
             draft_json = "{}"
@@ -272,6 +295,14 @@ class RagCardWorkflow:
                     await workflow.execute_activity(
                         verify_citations_activity,
                         args=[draft_json, context_json, job_id, request_id],
+                        start_to_close_timeout=STATUS_TIMEOUT,
+                        retry_policy=STATUS_RETRY,
+                    )
+                )
+                errors += json.loads(
+                    await workflow.execute_activity(
+                        output_guard_activity,
+                        args=[draft_json, job_id, request_id],
                         start_to_close_timeout=STATUS_TIMEOUT,
                         retry_policy=STATUS_RETRY,
                     )

@@ -18,11 +18,12 @@ from app.agents.prompts import rag_critic_agent, rag_generator_agent
 from app.core import db
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.guardrails import injection, pii
 from app.rag.context import DocumentContext, build_context
 from app.rag.retrieval import SearchFilters, search
 from app.repositories import chunks as chunks_repo
 from app.repositories import documents as documents_repo
-from app.schemas import CardDraft, Citation, CritiqueReport
+from app.schemas import TITLE_MAX_LENGTH, CardDraft, Citation, CritiqueReport
 from app.services.structured import call_structured
 
 log = get_logger(__name__)
@@ -32,19 +33,50 @@ class NoContextError(RuntimeError):
     """По выбранным документам ничего не нашлось."""
 
 
+class GuardrailsBlocked(RuntimeError):
+    """Подозрительных фрагментов слишком много — документ уходит человеку."""
+
+
 @dataclass
 class RagPipelineResult:
     draft: CardDraft
     attempts: int
     verdict: str
     context: DocumentContext
+    guard_report: dict
 
 
-def retrieve_context(document_ids: list[str], hint: str | None = None) -> DocumentContext:
-    """Найти фрагменты выбранных документов и собрать контекст.
+@dataclass
+class GuardedContext:
+    context: DocumentContext
+    report: dict
 
-    Запрос — подсказка, а если её нет, названия документов (заголовки видны
-    в именах файлов и секциях).
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "context": json.loads(self.context.to_json()),
+                "report": self.report,
+            },
+            ensure_ascii=False,
+        )
+
+    @classmethod
+    def from_json(cls, raw: str) -> "GuardedContext":
+        data = json.loads(raw)
+        return cls(
+            context=DocumentContext.from_json(json.dumps(data["context"])),
+            report=data["report"],
+        )
+
+
+async def retrieve_and_guard(
+    document_ids: list[str], hint: str | None = None
+) -> GuardedContext:
+    """Поиск, проверка на инъекции и сборка контекста с маскированием PII.
+
+    Порядок рубежей: сначала дешёвые правила инъекций (модель — только по
+    помеченным фрагментам), затем маскирование PII при сборке контекста.
+    Исходные контакты не попадают ни в промпт, ни в лог, ни в историю процесса.
     """
     query = (hint or "").strip()
     if not query:
@@ -58,12 +90,51 @@ def retrieve_context(document_ids: list[str], hint: str | None = None) -> Docume
         limit=settings.rag_search_limit,
         filters=SearchFilters(document_ids=document_ids),
     )
-    context = build_context(rows)
-    if not context.sources:
+    if not rows:
         raise NoContextError(
             "по выбранным документам не нашлось ни одного фрагмента для контекста"
         )
-    return context
+
+    clean: list[dict] = []
+    excluded: list[dict] = []
+    for chunk in rows:
+        verdict = await injection.detect(chunk.get("text") or "")
+        if verdict.suspicious:
+            excluded.append(
+                {
+                    "chunk_id": str(chunk["id"]),
+                    "document": chunk.get("filename"),
+                    "page": chunk.get("page"),
+                    "reasons": verdict.reasons,
+                }
+            )
+            continue
+        clean.append(chunk)
+
+    context = build_context(clean)
+    threshold = settings.injection_max_suspicious
+    blocked = len(excluded) >= threshold or (bool(excluded) and not context.sources)
+
+    if blocked:
+        reason = (
+            "все найденные фрагменты исключены как подозрительные"
+            if not context.sources
+            else f"исключено подозрительных фрагментов: {len(excluded)} "
+            f"(порог {threshold})"
+        )
+    elif excluded:
+        reason = f"исключено подозрительных фрагментов: {len(excluded)}"
+    else:
+        reason = ""
+
+    report = {
+        "masked": context.masked,
+        "excluded": excluded,
+        "threshold": threshold,
+        "blocked": blocked,
+        "reason": reason,
+    }
+    return GuardedContext(context=context, report=report)
 
 
 async def generate_card(
@@ -131,7 +202,10 @@ async def run_pipeline(
     max_attempts: int = 3,
 ) -> RagPipelineResult:
     """Полный цикл для тестов и не-Temporal вызовов."""
-    context = retrieve_context(document_ids, hint)
+    guarded = await retrieve_and_guard(document_ids, hint)
+    if guarded.report["blocked"]:
+        raise GuardrailsBlocked(guarded.report["reason"])
+    context = guarded.context
     feedback: list[str] = []
     draft: CardDraft | None = None
     verdict = "rejected"
@@ -142,9 +216,15 @@ async def run_pipeline(
         draft = await generate_card(context, hint, feedback or None)
 
         citation_errors = verify_citations(draft, context)
-        if citation_errors:
-            feedback = citation_errors
-            log.info("citations_rejected", attempt=attempt, errors=citation_errors)
+        output_errors = check_output(draft)
+        if citation_errors or output_errors:
+            feedback = citation_errors + output_errors
+            log.info(
+                "generation_rejected",
+                attempt=attempt,
+                citation_errors=citation_errors,
+                output_errors=output_errors,
+            )
             continue
 
         report = await critique_card(draft, context)
@@ -160,7 +240,11 @@ async def run_pipeline(
 
     assert draft is not None
     return RagPipelineResult(
-        draft=draft, attempts=attempts, verdict=verdict, context=context
+        draft=draft,
+        attempts=attempts,
+        verdict=verdict,
+        context=context,
+        guard_report=guarded.report,
     )
 
 
@@ -206,3 +290,48 @@ def dump_result(result: RagPipelineResult) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def card_text(card: CardDraft) -> str:
+    """Весь человекочитаемый текст карточки — для фильтра выхода."""
+    parts = [card.title, card.description]
+    parts.extend(card.characteristics.keys())
+    parts.extend(card.characteristics.values())
+    parts.extend(card.benefits)
+    parts.extend(card.missing_fields)
+    parts.extend([card.seo.title, card.seo.description, *card.seo.keywords])
+    return "\n".join(parts)
+
+
+def check_output(card: CardDraft) -> list[str]:
+    """Фильтр выхода: не просочились ли контакты и следы инструкций."""
+    text = card_text(card)
+    errors: list[str] = []
+
+    masked = pii.mask(text)
+    for kind, count in masked.counts.items():
+        errors.append(f"в карточке остались персональные данные: {kind} ({count})")
+
+    reasons = injection.rule_check(text)
+    if reasons:
+        errors.append("в карточке следы служебных инструкций: " + "; ".join(reasons))
+    return errors
+
+
+def sanitize_card(card: CardDraft) -> CardDraft:
+    """Точка страховки: в сохранённой карточке не должно быть исходных PII."""
+    data = card.model_dump()
+    data["title"] = pii.mask(data["title"]).text[:TITLE_MAX_LENGTH]
+    data["description"] = pii.mask(data["description"]).text
+    data["characteristics"] = {
+        pii.mask(name).text: pii.mask(value).text
+        for name, value in data["characteristics"].items()
+    }
+    data["benefits"] = [pii.mask(item).text for item in data["benefits"]]
+    data["missing_fields"] = [pii.mask(item).text for item in data["missing_fields"]]
+    data["seo"] = {
+        "title": pii.mask(data["seo"]["title"]).text[:TITLE_MAX_LENGTH],
+        "description": pii.mask(data["seo"]["description"]).text,
+        "keywords": [pii.mask(item).text for item in data["seo"].get("keywords", [])],
+    }
+    return CardDraft.model_validate(data)

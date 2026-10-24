@@ -14,6 +14,7 @@ class JobOut(BaseModel):
     attempts: int
     result: CardDraft | None = None
     error: str | None = None
+    guard_report: dict | None = None
 
 
 class DocumentOut(BaseModel):
