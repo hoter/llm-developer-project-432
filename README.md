@@ -37,12 +37,14 @@ cd llm-developer-project-432
 
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-dev.txt
+pip install -r requirements.lock    # фиксированные версии, одна команда
 
 cp .env.example .env
 ```
 
 Затем впишите модель из `curl localhost:1234/v1/models` в `LLM_MODEL`.
+`LLM_AUX_MODEL` — дешёвая модель для критика, судьи и детектора инъекций:
+если на вашем сервере модель одна, укажите её же.
 
 Модель эмбеддингов (`intfloat/multilingual-e5-large`, ~2.2 ГБ) скачается
 сама при первом обращении к поиску — нужен интернет. Модель генерации
@@ -84,7 +86,8 @@ make migrate
 # второй запуск:  новых миграций нет
 ```
 
-Новая миграция — новый файл с префиксом порядка (`0003_documents.sql`),
+Зависимости зафиксированы в `requirements.lock` (сгенерирован из
+`requirements-dev.txt`). Новая миграция — файл с префиксом порядка (`0007_…`),
 применяется тем же `make migrate`. Почему SQL-файлы, а не Alembic —
 в [docs/decisions.md](docs/decisions.md).
 

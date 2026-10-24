@@ -11,6 +11,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app.core import db
+from app.repositories import health as health_repo
 
 router = APIRouter(tags=["health"])
 
@@ -27,19 +28,17 @@ def ready():
     """Готовность: база доступна и расширение vector активно."""
     try:
         with db.connection() as conn:
-            row = conn.execute(
-                "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
-            ).fetchone()
+            version = health_repo.vector_version(conn)
     except Exception as exc:  # пул недоступен, база не отвечает
         return JSONResponse(
             {"status": "error", "database": "unavailable", "detail": str(exc)},
             status_code=503,
         )
 
-    if row is None:
+    if version is None:
         return JSONResponse(
             {"status": "error", "database": "ok", "vector": "missing"},
             status_code=503,
         )
 
-    return {"status": "ok", "database": "ok", "vector": row[0]}
+    return {"status": "ok", "database": "ok", "vector": version}
