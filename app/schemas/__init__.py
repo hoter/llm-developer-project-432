@@ -13,7 +13,7 @@ from app.schemas.cards import (
     SourceRef,
     SupplierFacts,
 )
-from app.schemas.jobs import JobIn, JobOut
+from app.schemas.jobs import DocumentOut, JobIn, JobOut
 
 __all__ = [
     "SEO_DESCRIPTION_MAX_LENGTH",
@@ -21,6 +21,7 @@ __all__ = [
     "TITLE_MAX_LENGTH",
     "CardDraft",
     "CritiqueReport",
+    "DocumentOut",
     "JobIn",
     "JobOut",
     "SeoBlock",

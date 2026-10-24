@@ -18,6 +18,7 @@ from app.core import db
 from app.core.logging import get_logger
 from app.repositories import jobs as jobs_repo
 from app.schemas import CardDraft, SupplierFacts
+from app.services import documents as documents_service
 from app.services import pipeline
 
 log = get_logger(__name__)
@@ -88,3 +89,13 @@ def set_status_activity(
             bump_attempts=bump_attempts,
         )
     log.info("job_status", job_id=job_id, status=status)
+
+
+@activity.defn
+def parse_document_activity(document_id: str) -> str:
+    """Разбор документа: диск + база, синхронно, в пуле потоков воркера.
+
+    Возвращает новый статус документа («indexed» или «failed»). Отказ с
+    причиной — нормальный исход: скан без текстового слоя не индексируется.
+    """
+    return documents_service.ingest_document(document_id)

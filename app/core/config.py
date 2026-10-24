@@ -26,5 +26,9 @@ class Settings(BaseSettings):
     # Ниже порога карточка не считается готовой: задача уходит человеку
     confidence_threshold: float = 0.6
 
+    # Документы поставщиков
+    uploads_dir: str = "data/uploads"
+    max_upload_bytes: int = 10 * 1024 * 1024
+
 
 settings = Settings()

@@ -14,3 +14,11 @@ class JobOut(BaseModel):
     attempts: int
     result: CardDraft | None = None
     error: str | None = None
+
+
+class DocumentOut(BaseModel):
+    id: str
+    filename: str
+    status: str
+    chunks_count: int
+    error: str | None = None

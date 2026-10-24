@@ -26,6 +26,7 @@ with workflow.unsafe.imports_passed_through():
         critique_activity,
         extract_activity,
         generate_activity,
+        parse_document_activity,
         set_status_activity,
     )
 
@@ -175,3 +176,30 @@ class CardWorkflow:
     @workflow.query
     def current_status(self) -> str:
         return self._status
+
+
+DOCUMENT_TIMEOUT = timedelta(minutes=10)
+DOCUMENT_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=2),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=60),
+    maximum_attempts=3,
+)
+
+
+@workflow.defn
+class DocumentWorkflow:
+    """Разбор документа поставщика: один шаг, повтор на инфраструктурных сбоях.
+
+    Ошибка разбора (скан без OCR, битый файл) не ретраится: activity сама
+    ставит документу статус failed с причиной и возвращает его.
+    """
+
+    @workflow.run
+    async def run(self, document_id: str) -> str:
+        return await workflow.execute_activity(
+            parse_document_activity,
+            document_id,
+            start_to_close_timeout=DOCUMENT_TIMEOUT,
+            retry_policy=DOCUMENT_RETRY,
+        )

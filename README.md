@@ -21,6 +21,7 @@ xlsx, строит по ним поисковый индекс и генерир
 - psycopg 3 + `psycopg_pool` (пул соединений уровня приложения)
 - Temporal — фоновые процессы и ожидание подтверждения
 - OpenAI Agents SDK как LLM-клиент
+- pypdf, python-docx, openpyxl — разбор документов поставщиков
 
 ## Установка
 
@@ -93,6 +94,8 @@ make temporal-worker  # Temporal-воркер (терминал 2)
 | `GET` | `/jobs/{id}` | статус задачи из базы и готовый черновик |
 | `POST` | `/jobs/{id}/approve` | сигнал подтверждения |
 | `POST` | `/jobs/{id}/request-changes` | сигнал отказа |
+| `POST` | `/documents` | загрузка файла поставщика, `202` и `id`; `pdf`, `docx`, `xlsx` |
+| `GET` | `/documents/{id}` | состояние документа и число фрагментов |
 | `GET` | `/workflows/{id}` | состояние процесса в Temporal (`run_status` + query) |
 | `GET` | `/workflows/{id}/result` | результат завершённого процесса |
 
@@ -106,6 +109,12 @@ curl -X POST localhost:8000/jobs -H 'Content-Type: application/json' \
 
 curl localhost:8000/jobs/9fb442b9c16e
 curl -X POST localhost:8000/jobs/9fb442b9c16e/approve
+
+curl -X POST localhost:8000/documents -F "file=@data/kettle_spec.xlsx"
+# {"id":"3f0e5ae94c4f","status":"new"}
+
+curl localhost:8000/documents/3f0e5ae94c4f
+# {"id":"...","filename":"kettle_spec.xlsx","status":"indexed","chunks_count":3,"error":null}
 ```
 
 ### Как идёт процесс
@@ -167,6 +176,32 @@ pending → extracting → generating → critiquing → (regenerating → …)
 `missing_fields`, а не в выдуманное значение; низкая уверенность честно
 пишется в `confidence`.
 
+## Документы поставщиков
+
+Загрузка (`POST /documents`) проверяет расширение (`pdf`, `docx`, `xlsx`) и
+размер (`MAX_UPLOAD_BYTES`), считает `sha256` и запускает `DocumentWorkflow`.
+Повторная загрузка того же файла возвращает существующий документ — дублей
+нет. Состояния: `new → parsing → indexed | failed`.
+
+| Формат | Что достаём |
+|---|---|
+| `pdf` | текст постранично; таблицы — бонусная ветка, не входит в базовый путь |
+| `docx` | параграфы и таблицы в порядке документа, заголовок — граница секции |
+| `xlsx` | первая строка — заголовки колонок, каждая строка — «артикул: параметр значение» |
+
+Разбор (`app/parsers/`):
+
+- **нормализация** — перенос через дефис склеивается, лигатуры и лишние
+  пробелы схлопываются; колонтитулы ищутся только на документах от трёх
+  страниц и только в первых/последних строках страницы (правило «большинство
+  страниц» на двухстраничном документе вымело бы весь текст);
+- **резка** — текст окном с перекрытием, таблица по строкам: строка не
+  рвётся, и каждая часть несёт строку заголовков колонок;
+- **метаданные фрагмента** — документ, страница, секция, артикул, бренд.
+
+Скан без текстового слоя (`data/boiler_scan.pdf`) получает `failed` с
+причиной: «в PDF нет текстового слоя…». Молча пустого результата не бывает.
+
 ## Проверки состояния
 
 | Эндпоинт | Что проверяет |
@@ -198,9 +233,14 @@ make lint   # ruff check app tests
 - лечение — невалидный JSON уходит обратно с текстом ошибки, пустой ответ
   даёт ошибку;
 - точечная переделка — длинный заголовок правится без переделки описания;
-- пайплайн — успех, переделка, исчерпанная петля, низкая уверенность.
+- пайплайн — успех, переделка, исчерпанная петля, низкая уверенность;
+- парсеры — страницы pdf, секции docx, строки xlsx, отказ скану;
+- нормализация — переносы, лигатуры, ловушка с двухстраничным колонтитулом;
+- резка — перекрытие, неразрывные строки таблицы, заголовки в каждой части;
+- сервис документов — индексация выданных файлов, отказ скану, отсутствие
+  дублей при повторной загрузке и повторном разборе.
 
-Тесты репозитория задач работают на живой базе и пропускаются, если Postgres
+Тесты репозиториев работают на живой базе и пропускаются, если Postgres
 недоступен.
 
 ## Структура
@@ -209,11 +249,12 @@ make lint   # ruff check app tests
 app/
 ├── main.py
 ├── core/          config.py, db.py, logging.py, migrate.py
-├── routers/       health.py, cards.py, jobs.py, workflows.py
-├── services/      pipeline.py, structured.py, json_utils.py
+├── routers/       health.py, cards.py, jobs.py, documents.py, workflows.py
+├── services/      pipeline.py, structured.py, json_utils.py, documents.py
 ├── agents/        prompts.py
 ├── llm/           client.py
-├── repositories/  jobs.py
+├── parsers/       pdf.py, docx.py, xlsx.py, normalizer.py, chunker.py
+├── repositories/  jobs.py, documents.py, chunks.py
 ├── schemas/       cards.py, jobs.py
 ├── temporal/      workflows.py, activities.py, client.py
 └── temporal_worker.py
@@ -223,7 +264,7 @@ docs/decisions.md  архитектурные решения
 tests/
 ```
 
-## Документы поставщиков
+## Набор документов
 
 Стартовый набор лежит в `data/` — как есть, без переименований:
 `blender_kp.docx`, `blender_passport.pdf`, `boiler_scan.pdf`,
