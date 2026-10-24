@@ -1,8 +1,9 @@
-.PHONY: help infra migrate api temporal-worker test lint
+.PHONY: help infra migrate reindex api temporal-worker test lint
 
 help:
 	@echo "make infra           - поднять postgres + temporal (docker compose)"
 	@echo "make migrate         - применить миграции из db/migrations/"
+	@echo "make reindex         - досчитать эмбеддинги фрагментам"
 	@echo "make api             - FastAPI на :8000"
 	@echo "make temporal-worker - temporal-воркер (workflow + activities)"
 	@echo "make test            - pytest"
@@ -13,6 +14,9 @@ infra:
 
 migrate:
 	python -m app.core.migrate
+
+reindex:
+	python -m app.rag.reindex
 
 api:
 	uvicorn app.main:app --reload --port 8000

@@ -11,6 +11,7 @@ from app.core.logging import get_logger
 from app.parsers import ParseError, parse_document
 from app.parsers.chunker import chunk_blocks
 from app.parsers.normalizer import normalize_blocks
+from app.rag.reindex import index_document
 from app.repositories import chunks as chunks_repo
 from app.repositories import documents as documents_repo
 
@@ -44,10 +45,20 @@ def ingest_document(document_id: str) -> str:
     # а не превратиться в «документ плохой».
     with db.connection() as conn:
         chunks_repo.replace_chunks(conn, document_id, chunks)
+
+    # Продолжение цепочки: векторы считаются сразу после фрагментов.
+    vectors = index_document(document_id)
+
+    with db.connection() as conn:
         documents_repo.set_status(
             conn, document_id, "indexed", chunks_count=len(chunks)
         )
-    log.info("document_indexed", document_id=document_id, chunks=len(chunks))
+    log.info(
+        "document_indexed",
+        document_id=document_id,
+        chunks=len(chunks),
+        vectors=vectors,
+    )
     return "indexed"
 
 

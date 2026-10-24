@@ -15,6 +15,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from app.core import db
 from app.core.config import settings
+from app.rag import retrieval
 from app.repositories import documents as documents_repo
 from app.schemas import DocumentOut
 from app.temporal.client import get_client
@@ -71,6 +72,35 @@ async def upload_document(file: UploadFile = File(...)):
 
     await _start_workflow(document_id)
     return JSONResponse({"id": document_id, "status": "new"}, status_code=202)
+
+
+@router.get("/search")
+async def search(
+    q: str,
+    mode: str = "hybrid",
+    limit: int | None = None,
+    min_similarity: float | None = None,
+    document_id: str | None = None,
+    section: str | None = None,
+    article: str | None = None,
+    brand: str | None = None,
+):
+    """Поиск по фрагментам: vector | text | hybrid + фильтры по метаданным."""
+    try:
+        return retrieval.search(
+            q,
+            mode=mode,
+            limit=limit,
+            min_similarity=min_similarity,
+            filters=retrieval.SearchFilters(
+                document_id=document_id,
+                section=section,
+                article=article,
+                brand=brand,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @router.get("/documents/{document_id}", response_model=DocumentOut)

@@ -30,5 +30,14 @@ class Settings(BaseSettings):
     uploads_dir: str = "data/uploads"
     max_upload_bytes: int = 10 * 1024 * 1024
 
+    # Эмбеддинги и поиск
+    embedding_model: str = "intfloat/multilingual-e5-large"
+    embedding_dimension: int = 1024
+    embedding_batch_size: int = 32
+    # Порог косинусной близости откалиброван на выданных документах
+    # (см. docs/decisions.md, ADR-005)
+    search_min_similarity: float = 0.826
+    search_limit: int = 5
+
 
 settings = Settings()

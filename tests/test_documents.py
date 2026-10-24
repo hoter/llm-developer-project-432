@@ -20,6 +20,14 @@ from app.services.documents import ingest_document
 DATA = Path(__file__).resolve().parent.parent / "data"
 
 
+@pytest.fixture(autouse=True)
+def no_embedding_model(monkeypatch):
+    """Индексация после разбора не должна грузить модель в тестах."""
+    monkeypatch.setattr(
+        "app.services.documents.index_document", lambda document_id: 0
+    )
+
+
 @pytest.fixture(scope="module")
 def conn():
     try:
